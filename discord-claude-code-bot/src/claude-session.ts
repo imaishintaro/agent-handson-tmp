@@ -62,6 +62,12 @@ type PersistedData = {
   channelModels: Record<string, string>;
   workspaces: Record<string, WorkspaceConfig>;
   channelCategoryCache: Record<string, string | null>;
+  // 会話履歴（タイムスタンプはISO文字列で保存）
+  conversationHistory: Record<string, Array<{
+    timestamp: string;
+    userPrompt: string;
+    assistantResponse: string;
+  }>>;
 };
 
 /**
@@ -201,7 +207,14 @@ export class ClaudeSessionManager {
       this.channelModels = new Map(Object.entries(data.channelModels || {}));
       this.workspaces = new Map(Object.entries(data.workspaces || {}));
       this.channelCategoryCache = new Map(Object.entries(data.channelCategoryCache || {}));
-      console.log(`セッションデータを読み込みました（${this.sessions.size}件）`);
+      // 会話履歴を復元（タイムスタンプをDateに変換）
+      for (const [channelId, turns] of Object.entries(data.conversationHistory || {})) {
+        this.conversationHistory.set(
+          channelId,
+          turns.map((t) => ({ ...t, timestamp: new Date(t.timestamp) }))
+        );
+      }
+      console.log(`セッションデータを読み込みました（${this.sessions.size}件、履歴${this.conversationHistory.size}チャンネル）`);
     } catch {
       console.error("セッションデータの読み込みに失敗しました（新規作成します）");
     }
@@ -217,6 +230,13 @@ export class ClaudeSessionManager {
         channelModels: Object.fromEntries(this.channelModels),
         workspaces: Object.fromEntries(this.workspaces),
         channelCategoryCache: Object.fromEntries(this.channelCategoryCache),
+        // 会話履歴（タイムスタンプをISO文字列に変換して保存）
+        conversationHistory: Object.fromEntries(
+          Array.from(this.conversationHistory.entries()).map(([k, v]) => [
+            k,
+            v.map((t) => ({ ...t, timestamp: t.timestamp.toISOString() })),
+          ])
+        ),
       };
       writeFileSync(this.persistPath, JSON.stringify(data, null, 2), "utf-8");
     } catch {
