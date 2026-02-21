@@ -611,10 +611,11 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
   // /claude-clear
   if (commandName === "claude-clear") {
-    const cleared = sessionManager.clearSession(interaction.channelId);
+    const { cleared, savedFile } = sessionManager.clearSession(interaction.channelId);
+    const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
     await interaction.reply(
       cleared
-        ? "セッションをクリアしました。新しい会話を始められます。"
+        ? `セッションをクリアしました。新しい会話を始められます。${memoryNote}`
         : "このチャンネルにはアクティブなセッションがありません。"
     );
     return;
@@ -834,10 +835,11 @@ client.on("messageCreate", async (message: Message) => {
 
   // セッションクリアコマンド
   if (prompt === "clear" || prompt === "リセット") {
-    const cleared = sessionManager.clearSession(message.channelId);
+    const { cleared, savedFile } = sessionManager.clearSession(message.channelId);
+    const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
     await message.reply(
       cleared
-        ? "セッションをクリアしました。新しい会話を始められます。"
+        ? `セッションをクリアしました。新しい会話を始められます。${memoryNote}`
         : "このチャンネルにはアクティブなセッションがありません。"
     );
     return;

@@ -1,5 +1,5 @@
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
 // ボット本体のルートディレクトリ（identify.md / context.md の置き場所）
@@ -69,6 +69,13 @@ type PersistedData = {
  * セッションIDを保持し、会話の継続を可能にする
  * ワークスペース単位でのルーティングもサポート
  */
+/** 会話の1ターン */
+type ConversationTurn = {
+  timestamp: Date;
+  userPrompt: string;
+  assistantResponse: string;
+};
+
 export class ClaudeSessionManager {
   // チャンネルID → セッションIDのマップ
   private sessions: Map<string, string> = new Map();
@@ -78,6 +85,8 @@ export class ClaudeSessionManager {
   private workspaces: Map<string, WorkspaceConfig> = new Map();
   // チャンネルID → カテゴリID のキャッシュ（ルーティング高速化）
   private channelCategoryCache: Map<string, string | null> = new Map();
+  // チャンネルID → 会話履歴（メモリ保存用）
+  private conversationHistory: Map<string, ConversationTurn[]> = new Map();
   private defaultWorkDir: string;
   private defaultModel: string;
   // セッションデータの保存先ファイルパス
@@ -88,6 +97,96 @@ export class ClaudeSessionManager {
     this.defaultModel = defaultModel;
     this.persistPath = join(workDir, ".sessions.json");
     this.load();
+  }
+
+  // ========================================
+  // メモリ管理（RAG）
+  // ========================================
+
+  /** メモリファイルの保存ディレクトリ */
+  private get memoryDir(): string {
+    return join(this.defaultWorkDir, "memory");
+  }
+
+  /**
+   * 会話履歴をタイムスタンプ付きMarkdownファイルに保存する
+   */
+  saveMemory(channelId: string): string | null {
+    const history = this.conversationHistory.get(channelId);
+    if (!history || history.length === 0) return null;
+
+    if (!existsSync(this.memoryDir)) {
+      mkdirSync(this.memoryDir, { recursive: true });
+    }
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const filename = `memory_${now.getFullYear()}_${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}.md`;
+    const filePath = join(this.memoryDir, filename);
+
+    const lines = [
+      `# 会話メモリ ${now.toLocaleString("ja-JP")}`,
+      "",
+      ...history.flatMap((turn) => [
+        `## ${turn.timestamp.toLocaleString("ja-JP")}`,
+        "",
+        `**ユーザー**: ${turn.userPrompt}`,
+        "",
+        `**アシスタント**: ${turn.assistantResponse}`,
+        "",
+      ]),
+    ];
+
+    writeFileSync(filePath, lines.join("\n"), "utf-8");
+    console.log(`[メモリ] 保存: ${filename} (${history.length}ターン)`);
+    return filename;
+  }
+
+  /**
+   * ユーザーのクエリに関連するメモリファイルをキーワード検索して返す
+   */
+  private searchMemories(query: string): string {
+    if (!existsSync(this.memoryDir)) return "";
+
+    const files = readdirSync(this.memoryDir)
+      .filter((f) => f.endsWith(".md"))
+      .sort()
+      .reverse(); // 新しい順
+
+    if (files.length === 0) return "";
+
+    // クエリを単語に分割（2文字以上）
+    const keywords = query
+      .toLowerCase()
+      .split(/[\s、。！？,.!?\n]+/)
+      .filter((w) => w.length >= 2);
+
+    if (keywords.length === 0) return "";
+
+    // 各ファイルのスコアを計算
+    const scored = files.map((file) => {
+      const content = readFileSync(join(this.memoryDir, file), "utf-8");
+      const lower = content.toLowerCase();
+      const score = keywords.filter((k) => lower.includes(k)).length;
+      return { file, content, score };
+    });
+
+    // スコア上位3件を取得（最低1件一致）
+    const relevant = scored
+      .filter((f) => f.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
+
+    if (relevant.length === 0) return "";
+
+    console.log(`[RAG] ${relevant.length}件のメモリが一致: ${relevant.map((f) => f.file).join(", ")}`);
+
+    return [
+      "<past_memories>",
+      "以下は過去の会話から検索された関連メモリです:",
+      ...relevant.map((f) => `\n### ${f.file}\n${f.content}`),
+      "</past_memories>",
+    ].join("\n");
   }
 
   /**
@@ -254,16 +353,25 @@ export class ClaudeSessionManager {
     const workDir = this.resolveWorkDir(channelId);
 
     // system.mdの内容を取得し、新規セッション開始時のみプロンプト先頭に注入する
-    // （appendSystemPromptはClaude Codeプリセットに上書きされるため、直接注入する）
     const extraPrompt = this.getExtraSystemPrompt();
     const isNewSession = !sessionId;
 
-    // ワークスペース外アクセス制限の指示を常に付加する
+    // ワークスペース外アクセス制限
     const workspaceBoundary = `\n\n<workspace_restriction>\nYou MUST only access files and directories inside: ${workDir}\nNEVER access paths outside this directory using ../ or absolute paths pointing elsewhere.\n</workspace_restriction>`;
 
-    const fullPrompt = (extraPrompt && isNewSession)
-      ? `<system_instructions>\n${extraPrompt}${workspaceBoundary}\n</system_instructions>\n\n${prompt}`
-      : `<system_instructions>${workspaceBoundary}\n</system_instructions>\n\n${prompt}`;
+    // RAG: 過去のメモリから関連情報を検索して注入
+    const ragContext = this.searchMemories(prompt);
+
+    const systemBlock = [
+      "<system_instructions>",
+      ...(extraPrompt && isNewSession ? [extraPrompt] : []),
+      workspaceBoundary,
+      "</system_instructions>",
+    ].join("\n");
+
+    const fullPrompt = ragContext
+      ? `${systemBlock}\n\n${ragContext}\n\n${prompt}`
+      : `${systemBlock}\n\n${prompt}`;
 
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
@@ -309,6 +417,14 @@ export class ClaudeSessionManager {
 
         if (message.subtype === "success") {
           resultText = message.result;
+          // 会話履歴に記録（RAG用）
+          const history = this.conversationHistory.get(channelId) || [];
+          history.push({
+            timestamp: new Date(),
+            userPrompt: prompt,
+            assistantResponse: resultText,
+          });
+          this.conversationHistory.set(channelId, history);
         } else if (message.subtype === "error_max_turns") {
           // ターン上限に達した場合、途中の回答があれば表示する
           const partial = "result" in message && message.result ? message.result : "";
@@ -316,10 +432,15 @@ export class ClaudeSessionManager {
             ? `${partial}\n\n⚠️ ターン上限に達しました。続きは改めて質問してください。`
             : "⚠️ 処理が長くなりすぎました。より具体的な質問に分割してお試しください。";
         } else if (message.subtype === "error_context_window_exceeded") {
-          // コンテキスト上限に達した場合はセッションをリセットして再試行を促す
+          // コンテキスト上限に達した場合は会話履歴を保存してセッションをリセット
+          const savedFile = this.saveMemory(channelId);
           this.sessions.delete(channelId);
+          this.conversationHistory.delete(channelId);
           this.save();
-          resultText = "⚠️ 会話が長くなりすぎてコンテキスト上限に達しました。\nセッションをリセットしました。もう一度質問してください。";
+          const memoryNote = savedFile
+            ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。`
+            : "";
+          resultText = `⚠️ 会話が長くなりすぎてコンテキスト上限に達しました。\nセッションをリセットしました。もう一度質問してください。${memoryNote}`;
         } else {
           // その他のエラー
           resultText = `エラーが発生しました: ${message.subtype}`;
@@ -423,11 +544,14 @@ export class ClaudeSessionManager {
 
   /**
    * チャンネルのセッションをクリアする
+   * 会話履歴があればメモリに保存してから削除する
    */
-  clearSession(channelId: string): boolean {
-    const result = this.sessions.delete(channelId);
+  clearSession(channelId: string): { cleared: boolean; savedFile: string | null } {
+    const savedFile = this.saveMemory(channelId);
+    const cleared = this.sessions.delete(channelId);
+    this.conversationHistory.delete(channelId);
     this.save();
-    return result;
+    return { cleared, savedFile };
   }
 
   /**
