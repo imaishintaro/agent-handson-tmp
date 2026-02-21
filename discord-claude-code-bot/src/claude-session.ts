@@ -252,9 +252,13 @@ export class ClaudeSessionManager {
     // （appendSystemPromptはClaude Codeプリセットに上書きされるため、直接注入する）
     const extraPrompt = this.getExtraSystemPrompt();
     const isNewSession = !sessionId;
+
+    // ワークスペース外アクセス制限の指示を常に付加する
+    const workspaceBoundary = `\n\n<workspace_restriction>\nYou MUST only access files and directories inside: ${workDir}\nNEVER access paths outside this directory using ../ or absolute paths pointing elsewhere.\n</workspace_restriction>`;
+
     const fullPrompt = (extraPrompt && isNewSession)
-      ? `<system_instructions>\n${extraPrompt}\n</system_instructions>\n\n${prompt}`
-      : prompt;
+      ? `<system_instructions>\n${extraPrompt}${workspaceBoundary}\n</system_instructions>\n\n${prompt}`
+      : `<system_instructions>${workspaceBoundary}\n</system_instructions>\n\n${prompt}`;
 
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
