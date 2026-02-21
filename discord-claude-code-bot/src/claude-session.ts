@@ -594,12 +594,10 @@ export class ClaudeSessionManager {
 
   /**
    * チャンネルのモデルを変更する
-   * セッションもクリアして新しいモデルで再開する
+   * セッションはそのまま継続（コンテキストを維持しつつモデルだけ切り替え）
    */
   setModel(channelId: string, model: string): void {
     this.channelModels.set(channelId, model);
-    // モデル変更時はセッションをリセット（新モデルで開始するため）
-    this.sessions.delete(channelId);
     this.save();
   }
 
