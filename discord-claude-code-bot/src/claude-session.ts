@@ -130,7 +130,7 @@ export class ClaudeSessionManager {
     const parts: string[] = [];
 
     const files: { path: string; label: string }[] = [
-      { path: join(this.defaultWorkDir, "system.md"),  label: "性格・口調" },
+      { path: join(this.defaultWorkDir, "identify.md"), label: "性格・口調" },
       { path: join(this.defaultWorkDir, "context.md"), label: "プロジェクト情報" },
     ];
 
