@@ -261,63 +261,88 @@ async function processAttachments(
 
 /**
  * Discordメッセージをリアルタイム進捗で更新する
- * レート制限を避けるため、最低2秒間隔で更新する
+ * ログを積み上げて表示し、レート制限を避けるため最低2秒間隔で更新する
  */
 function createProgressUpdater(
   editFn: (content: string) => Promise<any>
 ): (event: ProgressEvent) => void {
   let lastUpdateTime = 0;
-  let currentStatus = "考え中...";
   let pendingUpdate = false;
   const UPDATE_INTERVAL_MS = 2000;
+  // 積み上げるログ行
+  const logLines: string[] = ["考え中..."];
+
+  /**
+   * ログ行をDiscordの文字数制限に収めて返す（古い行を先頭から削る）
+   */
+  const buildContent = (): string => {
+    const MAX = 1800; // フッター用に余裕を持たせる
+    let content = logLines.join("\n");
+    while (content.length > MAX && logLines.length > 1) {
+      logLines.shift();
+      content = logLines.join("\n");
+    }
+    return content;
+  };
 
   const doUpdate = async () => {
     const now = Date.now();
     if (now - lastUpdateTime < UPDATE_INTERVAL_MS) {
-      // 更新間隔が短すぎる場合は後で更新
       if (!pendingUpdate) {
         pendingUpdate = true;
         setTimeout(async () => {
           pendingUpdate = false;
           lastUpdateTime = Date.now();
-          try {
-            await editFn(currentStatus);
-          } catch {
-            // 編集失敗は無視（メッセージ削除済みなど）
-          }
+          try { await editFn(buildContent()); } catch { /* 無視 */ }
         }, UPDATE_INTERVAL_MS - (now - lastUpdateTime));
       }
       return;
     }
-
     lastUpdateTime = now;
-    try {
-      await editFn(currentStatus);
-    } catch {
-      // 編集失敗は無視
-    }
+    try { await editFn(buildContent()); } catch { /* 無視 */ }
   };
 
   return (event: ProgressEvent) => {
     switch (event.type) {
+      case "assistant_text": {
+        const preview = event.text.slice(0, 200).replace(/\n/g, " ");
+        logLines.push(`💭 ${preview}${event.text.length > 200 ? "..." : ""}`);
+        doUpdate();
+        break;
+      }
+      case "tool_call": {
+        const inputStr = formatToolInput(event.toolName, event.input);
+        logLines.push(`⏺ **${event.toolName}**(${inputStr})`);
+        doUpdate();
+        break;
+      }
+      case "tool_result": {
+        const lines = event.output.split("\n").slice(0, 3).join(" / ");
+        const more = event.output.split("\n").length > 3
+          ? ` (+${event.output.split("\n").length - 3}行)` : "";
+        const icon = event.isError ? "⎿ Error:" : "⎿";
+        logLines.push(`  ${icon} ${lines}${more}`);
+        doUpdate();
+        break;
+      }
       case "tool_progress":
-        currentStatus = `⏳ **${toolDisplayName(event.toolName)}** 実行中... (${Math.floor(event.elapsedSeconds)}秒)`;
+        logLines.push(`⏳ **${toolDisplayName(event.toolName)}** 実行中... (${Math.floor(event.elapsedSeconds)}秒)`);
         doUpdate();
         break;
       case "tool_summary":
-        currentStatus = `✅ ${event.summary}`;
+        logLines.push(`✅ ${event.summary}`);
         doUpdate();
         break;
       case "task_started":
-        currentStatus = `🔄 サブタスク: ${event.description}`;
+        logLines.push(`🔄 サブタスク: ${event.description}`);
         doUpdate();
         break;
       case "task_completed":
-        if (event.status === "completed") {
-          currentStatus = `✅ 完了: ${event.summary}`;
-        } else {
-          currentStatus = `❌ ${event.status}: ${event.summary}`;
-        }
+        logLines.push(
+          event.status === "completed"
+            ? `✅ 完了: ${event.summary}`
+            : `❌ ${event.status}: ${event.summary}`
+        );
         doUpdate();
         break;
     }
