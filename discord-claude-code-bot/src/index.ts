@@ -384,7 +384,9 @@ async function sendResponse(
     (filePath) => new AttachmentBuilder(filePath, { name: basename(filePath) })
   );
 
-  const costInfo = costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
+  // OpenRouter利用時のみコストを表示（Pro/Maxプランは実費課金なし）
+  const showCost = !!process.env.OPENROUTER_API_KEY;
+  const costInfo = showCost && costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
   const wsInfo = workspaceName ? `\n-# ワークスペース: ${workspaceName}` : "";
   const attachInfo =
     attachments.length > 0
