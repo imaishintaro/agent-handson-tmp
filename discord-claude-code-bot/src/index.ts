@@ -570,13 +570,17 @@ client.once("ready", () => {
   );
 
   // システムプロンプトの読み込み元を表示
-  const systemMdPath = `${WORK_DIR}/system.md`;
-  if (existsSync(systemMdPath)) {
-    console.log(`システムプロンプト: system.md を使用 (${systemMdPath})`);
+  const systemMdPath  = `${WORK_DIR}/system.md`;
+  const contextMdPath = `${WORK_DIR}/context.md`;
+  const hasSystem  = existsSync(systemMdPath);
+  const hasContext = existsSync(contextMdPath);
+  if (hasSystem || hasContext) {
+    if (hasSystem)  console.log(`システムプロンプト: system.md  (性格・口調)`);
+    if (hasContext) console.log(`システムプロンプト: context.md (プロジェクト情報)`);
   } else if (process.env.SYSTEM_PROMPT) {
     console.log(`システムプロンプト: 環境変数 SYSTEM_PROMPT を使用`);
   } else {
-    console.log(`システムプロンプト: デフォルト（未設定）`);
+    console.log(`システムプロンプト: 未設定`);
   }
 });
 

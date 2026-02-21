@@ -123,20 +123,33 @@ export class ClaudeSessionManager {
 
   /**
    * 追加システムプロンプトを取得する
-   * 作業ディレクトリの system.md を優先し、なければ環境変数 SYSTEM_PROMPT を使う
+   * system.md（性格・口調）と context.md（プロジェクト情報）を結合して返す
+   * どちらも任意。なければ環境変数 SYSTEM_PROMPT にフォールバック
    */
   private getExtraSystemPrompt(): string {
-    const systemMdPath = join(this.defaultWorkDir, "system.md");
-    if (existsSync(systemMdPath)) {
-      try {
-        const content = readFileSync(systemMdPath, "utf-8").trim();
-        console.log(`[DEBUG] system.md 読み込み: ${systemMdPath}`);
-        console.log(`[DEBUG] 内容: ${content.slice(0, 100)}...`);
-        return content;
-      } catch {
-        console.error("system.md の読み込みに失敗しました");
+    const parts: string[] = [];
+
+    const files: { path: string; label: string }[] = [
+      { path: join(this.defaultWorkDir, "system.md"),  label: "性格・口調" },
+      { path: join(this.defaultWorkDir, "context.md"), label: "プロジェクト情報" },
+    ];
+
+    for (const { path, label } of files) {
+      if (existsSync(path)) {
+        try {
+          const content = readFileSync(path, "utf-8").trim();
+          if (content) {
+            parts.push(content);
+            console.log(`[システムプロンプト] ${label}: ${path}`);
+          }
+        } catch {
+          console.error(`${path} の読み込みに失敗しました`);
+        }
       }
     }
+
+    if (parts.length > 0) return parts.join("\n\n---\n\n");
+
     return process.env.SYSTEM_PROMPT || "";
   }
 
