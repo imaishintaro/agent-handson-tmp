@@ -368,18 +368,31 @@ function logUserMessage(
 function logProgress(event: ProgressEvent): void {
   switch (event.type) {
     case "assistant_text": {
-      // Claudeの考え・返答テキストをコンソールに表示
       const preview = event.text.slice(0, 300).replace(/\n/g, " ");
       log("🤔 Claude", C.blue, `${preview}${event.text.length > 300 ? "..." : ""}`);
       break;
     }
+    case "tool_call": {
+      // ⏺ Bash(git status) のような形式で表示
+      const inputStr = formatToolInput(event.toolName, event.input);
+      console.log(`${C.green}⏺ ${event.toolName}${C.reset}(${C.gray}${inputStr}${C.reset})`);
+      break;
+    }
+    case "tool_result": {
+      // ⎿ 結果 の形式で表示
+      const icon = event.isError ? `${C.red}⎿ Error:${C.reset}` : `${C.gray}⎿ ${C.reset}`;
+      const lines = event.output.split("\n").slice(0, 5); // 最大5行
+      const more = event.output.split("\n").length > 5 ? ` ... (+${event.output.split("\n").length - 5}行)` : "";
+      console.log(`  ${icon} ${lines.join("\n     ")}${more}`);
+      break;
+    }
     case "tool_progress":
-      log("🔧 ツール実行", C.yellow,
+      log("🔧 実行中", C.yellow,
         `${toolDisplayName(event.toolName)} (${Math.floor(event.elapsedSeconds)}秒経過)`
       );
       break;
     case "tool_summary":
-      log("✅ ツール完了", C.green, event.summary);
+      log("✅ 完了", C.green, event.summary);
       break;
     case "task_started":
       log("🔄 サブタスク", C.blue, event.description);
@@ -391,6 +404,33 @@ function logProgress(event: ProgressEvent): void {
       );
       break;
     }
+  }
+}
+
+/**
+ * ツールの入力パラメータを簡潔な文字列に変換する
+ */
+function formatToolInput(toolName: string, input: Record<string, unknown>): string {
+  // ツールごとに主要なパラメータを抽出
+  switch (toolName) {
+    case "Bash":
+      return String(input.command || "").slice(0, 100);
+    case "Read":
+      return String(input.file_path || "");
+    case "Write":
+      return String(input.file_path || "");
+    case "Edit":
+      return String(input.file_path || "");
+    case "Glob":
+      return String(input.pattern || "");
+    case "Grep":
+      return `"${String(input.pattern || "")}"`;
+    case "WebFetch":
+      return String(input.url || "").slice(0, 80);
+    case "WebSearch":
+      return String(input.query || "").slice(0, 80);
+    default:
+      return JSON.stringify(input).slice(0, 100);
   }
 }
 

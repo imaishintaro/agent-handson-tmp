@@ -22,6 +22,17 @@ export type ProgressEvent = {
   // Claudeのテキスト出力（考え中の内容）
   type: "assistant_text";
   text: string;
+} | {
+  // ツール呼び出し（名前と入力パラメータ）
+  type: "tool_call";
+  toolName: string;
+  input: Record<string, unknown>;
+} | {
+  // ツール実行結果
+  type: "tool_result";
+  toolName: string;
+  output: string;
+  isError: boolean;
 };
 
 /**
@@ -242,15 +253,36 @@ export class ClaudeSessionManager {
   ): void {
     if (!onProgress) return;
 
-    // Claudeのテキスト出力（返答を考えている内容）
+    // Claudeのテキスト出力とツール呼び出しをキャプチャ
     if (message.type === "assistant") {
-      const textContent = message.message?.content
-        ?.filter((c: any) => c.type === "text")
-        ?.map((c: any) => c.text)
-        ?.join("") || "";
-      if (textContent) {
-        onProgress({ type: "assistant_text", text: textContent });
+      const contents: any[] = message.message?.content || [];
+      for (const c of contents) {
+        if (c.type === "text" && c.text) {
+          onProgress({ type: "assistant_text", text: c.text });
+        }
+        if (c.type === "tool_use") {
+          onProgress({
+            type: "tool_call",
+            toolName: c.name,
+            input: c.input || {},
+          });
+        }
       }
+    }
+
+    // ツール実行結果をキャプチャ
+    if (message.type === "tool_result") {
+      const contents: any[] = message.content || [];
+      const output = contents
+        .filter((c: any) => c.type === "text")
+        .map((c: any) => c.text)
+        .join("\n");
+      onProgress({
+        type: "tool_result",
+        toolName: message.tool_use_id || "",
+        output: output.slice(0, 500),
+        isError: message.is_error || false,
+      });
     }
 
     // ツール実行中の進捗（例: Bashコマンド実行中, ファイル読み込み中）
