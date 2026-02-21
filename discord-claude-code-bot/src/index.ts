@@ -28,18 +28,18 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
-if (!process.env.OPENROUTER_API_KEY) {
-  console.error("エラー: OPENROUTER_API_KEY が設定されていません");
-  process.exit(1);
+// APIキーは任意（Claude Code Pro/MaxプランはCLIのログイン認証を使うため不要）
+// OpenRouter経由で使う場合のみ設定する
+if (process.env.OPENROUTER_API_KEY) {
+  process.env.ANTHROPIC_API_KEY = process.env.OPENROUTER_API_KEY;
+  process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1";
+  console.log("OpenRouter APIを使用します");
+} else {
+  console.log("Claude Code CLIのログイン認証を使用します（Pro/Maxプラン）");
 }
 
-// OpenRouterを使用するためにAnthropicSDKの向き先を書き換える
-// claude-agent-sdk内部のAnthropicクライアントがこれらの環境変数を参照する
-process.env.ANTHROPIC_API_KEY = process.env.OPENROUTER_API_KEY;
-process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1";
-
 // 設定値
-const DEFAULT_MODEL = process.env.MODEL || "anthropic/claude-sonnet-4-20250514";
+const DEFAULT_MODEL = process.env.MODEL || "claude-sonnet-4-20250514";
 const WORK_DIR = process.env.WORK_DIR || process.cwd();
 const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
   ? process.env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
@@ -459,10 +459,18 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     const model = interaction.options.getString("model", true);
     sessionManager.setModel(interaction.channelId, model);
 
+    // よく使うモデルの表示名（未登録の場合はモデルIDをそのまま表示）
     const modelNames: Record<string, string> = {
-      "anthropic/claude-sonnet-4-20250514": "Sonnet (高速・バランス型)",
-      "anthropic/claude-opus-4-20250514": "Opus (最高性能)",
-      "anthropic/claude-haiku-4-5-20251001": "Haiku (最速・軽量)",
+      "anthropic/claude-sonnet-4-20250514": "Claude Sonnet 4 (高速・バランス型)",
+      "anthropic/claude-opus-4-20250514": "Claude Opus 4 (最高性能)",
+      "anthropic/claude-haiku-4-5-20251001": "Claude Haiku 4.5 (最速・軽量)",
+      "anthropic/claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet",
+      "anthropic/claude-3-5-haiku-20241022": "Claude 3.5 Haiku",
+      "openai/gpt-4o": "GPT-4o",
+      "openai/gpt-4o-mini": "GPT-4o Mini",
+      "google/gemini-2.0-flash-001": "Gemini 2.0 Flash",
+      "google/gemini-2.5-pro-preview-03-25": "Gemini 2.5 Pro",
+      "meta-llama/llama-3.3-70b-instruct": "Llama 3.3 70B",
     };
     const displayName = modelNames[model] || model;
 
