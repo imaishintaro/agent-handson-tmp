@@ -28,6 +28,10 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
+// Claude Code内から起動された場合のネスト実行制限を解除する
+// （このボット自体をClaude Codeセッション内で起動した場合に必要）
+delete process.env.CLAUDECODE;
+
 // APIキーは任意（Claude Code Pro/MaxプランはCLIのログイン認証を使うため不要）
 // OpenRouter経由で使う場合のみ設定する
 if (process.env.OPENROUTER_API_KEY) {
