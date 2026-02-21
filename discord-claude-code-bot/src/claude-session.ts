@@ -57,6 +57,13 @@ export class ClaudeSessionManager {
     this.defaultModel = defaultModel;
   }
 
+  /**
+   * 追加システムプロンプトを取得する（環境変数から）
+   */
+  private getExtraSystemPrompt(): string {
+    return process.env.SYSTEM_PROMPT || "";
+  }
+
   // ========================================
   // ワークスペース管理
   // ========================================
@@ -148,16 +155,21 @@ export class ClaudeSessionManager {
     // チャンネルに対応する作業ディレクトリを解決
     const workDir = this.resolveWorkDir(channelId);
 
+    // 追加システムプロンプト（性格・口調などのカスタマイズ）
+    const extraPrompt = this.getExtraSystemPrompt();
+
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
       cwd: workDir,
       model,
       maxTurns: 50,
       // Claude Codeのシステムプロンプトとツールを使用
+      // 追加プロンプトがあれば末尾に付加して性格をカスタマイズ
       systemPrompt: {
         type: "preset" as const,
         preset: "claude_code" as const,
       },
+      ...(extraPrompt && { appendSystemPrompt: extraPrompt }),
       tools: {
         type: "preset" as const,
         preset: "claude_code" as const,
