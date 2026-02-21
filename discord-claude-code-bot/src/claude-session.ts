@@ -315,6 +315,11 @@ export class ClaudeSessionManager {
           resultText = partial
             ? `${partial}\n\n⚠️ ターン上限に達しました。続きは改めて質問してください。`
             : "⚠️ 処理が長くなりすぎました。より具体的な質問に分割してお試しください。";
+        } else if (message.subtype === "error_context_window_exceeded") {
+          // コンテキスト上限に達した場合はセッションをリセットして再試行を促す
+          this.sessions.delete(channelId);
+          this.save();
+          resultText = "⚠️ 会話が長くなりすぎてコンテキスト上限に達しました。\nセッションをリセットしました。もう一度質問してください。";
         } else {
           // その他のエラー
           resultText = `エラーが発生しました: ${message.subtype}`;
