@@ -280,8 +280,8 @@ export class ClaudeSessionManager {
       },
       // プロジェクト設定を読み込む
       settingSources: ["project" as const],
-      // ファイル編集は自動許可（Discordでの承認UIが難しいため）
-      permissionMode: "acceptEdits" as const,
+      // Discordでは許可ダイアログを操作できないため全ツールを自動許可
+      permissionMode: "bypassPermissions" as const,
     };
 
     // 既存セッションがあれば継続
