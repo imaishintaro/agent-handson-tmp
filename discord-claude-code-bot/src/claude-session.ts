@@ -420,9 +420,21 @@ export class ClaudeSessionManager {
     let resultText = "";
     let costUsd = 0;
     let newSessionId = "";
+    // OpenRouter等でmessage.resultが空の場合のフォールバック用
+    let lastAssistantText = "";
 
     // Agent SDKのストリームを処理
     for await (const message of query({ prompt: fullPrompt, options })) {
+      // assistantメッセージのテキストをフォールバック用に蓄積
+      if (message.type === "assistant") {
+        const contents: any[] = (message.message as any)?.content || [];
+        for (const c of contents) {
+          if (c.type === "text" && c.text) {
+            lastAssistantText += c.text;
+          }
+        }
+      }
+
       // 進捗イベントをコールバックに通知
       this.handleProgressEvent(message, onProgress);
 
@@ -436,7 +448,8 @@ export class ClaudeSessionManager {
         newSessionId = message.session_id;
 
         if (message.subtype === "success") {
-          resultText = message.result;
+          // OpenRouter等ではmessage.resultが空になる場合があるのでフォールバック
+          resultText = message.result || lastAssistantText;
           // 会話履歴に記録（RAG用）
           const history = this.conversationHistory.get(channelId) || [];
           history.push({
