@@ -267,10 +267,12 @@ async function processAttachments(
 /**
  * Discordメッセージをリアルタイム進捗で更新する
  * ログを積み上げて表示し、レート制限を避けるため最低2秒間隔で更新する
+ * finish() を呼ぶと以降の更新をキャンセルする（最終応答の上書き防止）
  */
 function createProgressUpdater(
   editFn: (content: string) => Promise<any>
-): (event: ProgressEvent) => void {
+): { handler: (event: ProgressEvent) => void; finish: () => void } {
+  let done = false;
   let lastUpdateTime = 0;
   let pendingUpdate = false;
   const UPDATE_INTERVAL_MS = 2000;
@@ -291,12 +293,14 @@ function createProgressUpdater(
   };
 
   const doUpdate = async () => {
+    if (done) return;
     const now = Date.now();
     if (now - lastUpdateTime < UPDATE_INTERVAL_MS) {
       if (!pendingUpdate) {
         pendingUpdate = true;
         setTimeout(async () => {
           pendingUpdate = false;
+          if (done) return; // 最終応答送信後はキャンセル
           lastUpdateTime = Date.now();
           try { await editFn(buildContent()); } catch { /* 無視 */ }
         }, UPDATE_INTERVAL_MS - (now - lastUpdateTime));
@@ -307,7 +311,8 @@ function createProgressUpdater(
     try { await editFn(buildContent()); } catch { /* 無視 */ }
   };
 
-  return (event: ProgressEvent) => {
+  const handler = (event: ProgressEvent) => {
+    if (done) return;
     switch (event.type) {
       case "assistant_text": {
         const preview = event.text.slice(0, 200).replace(/\n/g, " ");
@@ -352,6 +357,10 @@ function createProgressUpdater(
         break;
     }
   };
+
+  const finish = () => { done = true; };
+
+  return { handler, finish };
 }
 
 // ========================================
@@ -467,12 +476,9 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
 /**
  * Claudeの応答をログ出力
  */
-function logResponse(responseText: string, costUsd: number): void {
+function logResponse(responseText: string): void {
   const preview = responseText.slice(0, 200).replace(/\n/g, " ");
   log("💬 応答", C.magenta, `${preview}${responseText.length > 200 ? "..." : ""}`);
-  if (process.env.OPENROUTER_API_KEY && costUsd > 0) {
-    log("💰 コスト", C.gray, `$${costUsd.toFixed(4)}`);
-  }
 }
 
 // ========================================
@@ -519,7 +525,6 @@ function getHelpText(): string {
  */
 async function sendResponse(
   responseText: string,
-  costUsd: number,
   channelId: string,
   editFirstMessage: (content: string) => Promise<any>,
   sendToChannel: (content: string) => Promise<any>,
@@ -535,15 +540,12 @@ async function sendResponse(
     (filePath) => new AttachmentBuilder(filePath, { name: basename(filePath) })
   );
 
-  // OpenRouter利用時のみコストを表示（Pro/Maxプランは実費課金なし）
-  const showCost = !!process.env.OPENROUTER_API_KEY;
-  const costInfo = showCost && costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
   const wsInfo = workspaceName ? `\n-# ワークスペース: ${workspaceName}` : "";
   const attachInfo =
     attachments.length > 0
       ? `\n-# 添付: ${attachableFiles.map((f) => basename(f)).join(", ")}`
       : "";
-  const footer = attachInfo + wsInfo + costInfo;
+  const footer = attachInfo + wsInfo;
 
   // 最初のチャンクで元のメッセージを編集
   await editFirstMessage(
@@ -771,7 +773,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     await interaction.deferReply();
 
     // 進捗更新用コールバック（Discord表示 + コンソールログ）
-    const onProgress = createProgressUpdater((content) =>
+    const { handler: onProgress, finish: finishProgress } = createProgressUpdater((content) =>
       interaction.editReply(content)
     );
     const onProgressWithLog = (event: ProgressEvent) => {
@@ -780,18 +782,18 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     };
 
     try {
-      const { result, costUsd } = await sessionManager.sendPrompt(
+      const { result } = await sessionManager.sendPrompt(
         interaction.channelId,
         prompt,
         onProgressWithLog
       );
 
+      finishProgress(); // 進捗更新をここで止める（最終応答の上書き防止）
       const responseText = result || "（応答なし）";
-      logResponse(responseText, costUsd);
+      logResponse(responseText);
 
       await sendResponse(
         responseText,
-        costUsd,
         interaction.channelId,
         (content) => interaction.editReply(content),
         (content) => (interaction.channel as TextChannel).send(content),
@@ -884,7 +886,7 @@ client.on("messageCreate", async (message: Message) => {
   const thinkingMessage = await message.reply("考え中...");
 
   // 進捗更新用コールバック（Discord表示 + コンソールログ）
-  const onProgress = createProgressUpdater((content) =>
+  const { handler: onProgress, finish: finishProgress } = createProgressUpdater((content) =>
     thinkingMessage.edit(content)
   );
   const onProgressWithLog = (event: ProgressEvent) => {
@@ -898,20 +900,20 @@ client.on("messageCreate", async (message: Message) => {
     const fullPrompt = prompt + promptAddition;
 
     // Claude Codeにプロンプトを送信
-    const { result, costUsd } = await sessionManager.sendPrompt(
+    const { result } = await sessionManager.sendPrompt(
       message.channelId,
       fullPrompt,
       onProgressWithLog
     );
 
+    finishProgress(); // 進捗更新をここで止める（最終応答の上書き防止）
     const responseText = result || "（応答なし）";
-    logResponse(responseText, costUsd);
+    logResponse(responseText);
 
     const channel = message.channel as TextChannel;
 
     await sendResponse(
       responseText,
-      costUsd,
       message.channelId,
       (content) => thinkingMessage.edit(content),
       (content) => channel.send(content),
