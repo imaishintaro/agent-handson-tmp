@@ -42,9 +42,9 @@ const commands = [
         .setDescription("使用するモデル")
         .setRequired(true)
         .addChoices(
-          { name: "Sonnet (高速・バランス型)", value: "claude-sonnet-4-20250514" },
-          { name: "Opus (最高性能)", value: "claude-opus-4-20250514" },
-          { name: "Haiku (最速・軽量)", value: "claude-haiku-4-5-20251001" }
+          { name: "Sonnet (高速・バランス型)", value: "anthropic/claude-sonnet-4-20250514" },
+          { name: "Opus (最高性能)", value: "anthropic/claude-opus-4-20250514" },
+          { name: "Haiku (最速・軽量)", value: "anthropic/claude-haiku-4-5-20251001" }
         )
     ),
 
