@@ -35,8 +35,13 @@ delete process.env.CLAUDECODE;
 // APIキーは任意（Claude Code Pro/MaxプランはCLIのログイン認証を使うため不要）
 // OpenRouter経由で使う場合のみ設定する
 if (process.env.OPENROUTER_API_KEY) {
-  process.env.ANTHROPIC_API_KEY = process.env.OPENROUTER_API_KEY;
-  process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1";
+  // OpenRouter の Anthropic 互換エンドポイント
+  // ANTHROPIC_AUTH_TOKEN にキーをセットし、ANTHROPIC_API_KEY は空にする
+  process.env.ANTHROPIC_AUTH_TOKEN = process.env.OPENROUTER_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "";
+  process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api";
+  // テレメトリ無効化（OpenRouter 経由ではAnthropicへの非API通信を止める）
+  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   console.log("OpenRouter APIを使用します");
 } else {
   console.log("Claude Code CLIのログイン認証を使用します（Pro/Maxプラン）");
