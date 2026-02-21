@@ -4,6 +4,7 @@ import {
   ChannelType,
   Client,
   Collection,
+  EmbedBuilder,
   GatewayIntentBits,
   type GuildBasedChannel,
   type Interaction,
@@ -54,8 +55,17 @@ const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
   ? process.env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
   : [];
 
-// Discordの1メッセージあたりの文字数上限
-const DISCORD_MAX_LENGTH = 2000;
+// Embedのdescription文字数上限（Discord上限は4096）
+const EMBED_MAX_LENGTH = 4000;
+
+// Embedカラー定義
+const EMBED_COLOR = {
+  progress: 0xf59e0b, // アンバー（処理中）
+  response: 0x5865f2, // ブランドパープル（応答）
+  error: 0xef4444,    // 赤（エラー）
+  info: 0x3b82f6,     // 青（情報）
+  success: 0x22c55e,  // 緑（成功）
+} as const;
 
 // ボットへのプレフィックス（従来方式も維持）
 const PREFIX = "!claude";
@@ -82,10 +92,10 @@ const client = new Client({
 // ========================================
 
 /**
- * 長いテキストをDiscordの文字数制限に収まるように分割する
+ * 長いテキストをEmbedのdescription上限に収まるように分割する
  */
-function splitMessage(text: string): string[] {
-  if (text.length <= DISCORD_MAX_LENGTH) {
+function splitMessage(text: string, maxLength = EMBED_MAX_LENGTH): string[] {
+  if (text.length <= maxLength) {
     return [text];
   }
 
@@ -93,18 +103,18 @@ function splitMessage(text: string): string[] {
   let remaining = text;
 
   while (remaining.length > 0) {
-    if (remaining.length <= DISCORD_MAX_LENGTH) {
+    if (remaining.length <= maxLength) {
       chunks.push(remaining);
       break;
     }
 
     // 分割ポイントを探す（改行 > スペース > 強制分割）
-    let splitIndex = remaining.lastIndexOf("\n", DISCORD_MAX_LENGTH);
-    if (splitIndex === -1 || splitIndex < DISCORD_MAX_LENGTH / 2) {
-      splitIndex = remaining.lastIndexOf(" ", DISCORD_MAX_LENGTH);
+    let splitIndex = remaining.lastIndexOf("\n", maxLength);
+    if (splitIndex === -1 || splitIndex < maxLength / 2) {
+      splitIndex = remaining.lastIndexOf(" ", maxLength);
     }
-    if (splitIndex === -1 || splitIndex < DISCORD_MAX_LENGTH / 2) {
-      splitIndex = DISCORD_MAX_LENGTH;
+    if (splitIndex === -1 || splitIndex < maxLength / 2) {
+      splitIndex = maxLength;
     }
 
     chunks.push(remaining.substring(0, splitIndex));
@@ -172,6 +182,91 @@ function toolDisplayName(toolName: string): string {
     TodoWrite: "タスク管理",
   };
   return names[toolName] || toolName;
+}
+
+// ========================================
+// Embed ビルダー
+// ========================================
+
+/**
+ * 処理中の進捗を表すEmbedを作成する
+ * 文字数上限を超えた場合は古い行から削る
+ */
+function buildProgressEmbed(logLines: string[]): EmbedBuilder {
+  const lines = [...logLines];
+  let desc = lines.join("\n");
+  while (desc.length > EMBED_MAX_LENGTH && lines.length > 1) {
+    lines.shift();
+    desc = lines.join("\n");
+  }
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR.progress)
+    .setDescription(desc || "考え中...");
+}
+
+/**
+ * Claudeの応答を表すEmbedを作成する
+ */
+function buildResponseEmbed(text: string, footerText?: string): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(EMBED_COLOR.response)
+    .setDescription(text);
+  if (footerText) embed.setFooter({ text: footerText });
+  return embed;
+}
+
+/**
+ * エラーを表すEmbedを作成する
+ */
+function buildErrorEmbed(errorMessage: string): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR.error)
+    .setTitle("❌ エラーが発生しました")
+    .setDescription(errorMessage);
+}
+
+/**
+ * ヘルプを表すEmbedを作成する
+ */
+function buildHelpEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR.info)
+    .setTitle("Discord Claude Code Bot")
+    .setDescription(
+      "Claude Codeの機能をDiscordから利用できます。\n" +
+      "ファイルの読み書き、コード生成、Git操作などが可能です。"
+    )
+    .addFields(
+      {
+        name: "スラッシュコマンド",
+        value:
+          "`/claude prompt:<メッセージ>` — Claude Codeにメッセージを送る\n" +
+          "`/claude-clear` — セッションをリセット\n" +
+          "`/claude-model model:<モデル>` — モデルを変更\n" +
+          "`/claude-workspace name:<名前> directory:<パス>` — ワークスペースを登録\n" +
+          "`/claude-workspaces` — ワークスペース一覧を表示\n" +
+          "`/claude-help` — このヘルプを表示",
+      },
+      {
+        name: "プレフィックス方式（従来互換）",
+        value:
+          `\`${PREFIX} <メッセージ>\` — Claude Codeにメッセージを送る\n` +
+          `\`${PREFIX} clear\` — セッションをリセット\n` +
+          `\`${PREFIX} help\` — このヘルプを表示`,
+      },
+      {
+        name: "添付ファイル",
+        value: "メッセージに画像やファイルを添付すると、Claudeに渡されます。",
+      },
+      {
+        name: "ワークスペース",
+        value: "カテゴリ内のチャンネルは自動的にワークスペースのディレクトリで作業します。",
+      },
+      {
+        name: "進捗通知",
+        value: "処理中はツール実行状況がリアルタイムで表示されます。",
+      },
+    );
 }
 
 // ========================================
@@ -265,12 +360,12 @@ async function processAttachments(
 // ========================================
 
 /**
- * Discordメッセージをリアルタイム進捗で更新する
+ * Discordメッセージをリアルタイム進捗でEmbedを使って更新する
  * ログを積み上げて表示し、レート制限を避けるため最低2秒間隔で更新する
  * finish() を呼ぶと以降の更新をキャンセルする（最終応答の上書き防止）
  */
 function createProgressUpdater(
-  editFn: (content: string) => Promise<any>
+  editFn: (options: { embeds: EmbedBuilder[] }) => Promise<any>
 ): { handler: (event: ProgressEvent) => void; finish: () => void } {
   let done = false;
   let lastUpdateTime = 0;
@@ -278,19 +373,6 @@ function createProgressUpdater(
   const UPDATE_INTERVAL_MS = 2000;
   // 積み上げるログ行
   const logLines: string[] = ["考え中..."];
-
-  /**
-   * ログ行をDiscordの文字数制限に収めて返す（古い行を先頭から削る）
-   */
-  const buildContent = (): string => {
-    const MAX = 1800; // フッター用に余裕を持たせる
-    let content = logLines.join("\n");
-    while (content.length > MAX && logLines.length > 1) {
-      logLines.shift();
-      content = logLines.join("\n");
-    }
-    return content;
-  };
 
   const doUpdate = async () => {
     if (done) return;
@@ -302,13 +384,13 @@ function createProgressUpdater(
           pendingUpdate = false;
           if (done) return; // 最終応答送信後はキャンセル
           lastUpdateTime = Date.now();
-          try { await editFn(buildContent()); } catch { /* 無視 */ }
+          try { await editFn({ embeds: [buildProgressEmbed(logLines)] }); } catch { /* 無視 */ }
         }, UPDATE_INTERVAL_MS - (now - lastUpdateTime));
       }
       return;
     }
     lastUpdateTime = now;
-    try { await editFn(buildContent()); } catch { /* 無視 */ }
+    try { await editFn({ embeds: [buildProgressEmbed(logLines)] }); } catch { /* 無視 */ }
   };
 
   const handler = (event: ProgressEvent) => {
@@ -482,52 +564,17 @@ function logResponse(responseText: string): void {
 }
 
 // ========================================
-// ヘルプテキスト
-// ========================================
-
-function getHelpText(): string {
-  return [
-    "**Discord Claude Code Bot**",
-    "",
-    "Claude Codeの機能をDiscordから利用できます。",
-    "ファイルの読み書き、コード生成、Git操作などが可能です。",
-    "",
-    "**スラッシュコマンド:**",
-    "`/claude prompt:<メッセージ>` — Claude Codeにメッセージを送る",
-    "`/claude-clear` — セッションをリセット",
-    "`/claude-model model:<モデル>` — モデルを変更",
-    "`/claude-workspace name:<名前> directory:<パス>` — ワークスペースを登録",
-    "`/claude-workspaces` — ワークスペース一覧を表示",
-    "`/claude-help` — このヘルプを表示",
-    "",
-    "**プレフィックス方式（従来互換）:**",
-    `\`${PREFIX} <メッセージ>\` — Claude Codeにメッセージを送る`,
-    `\`${PREFIX} clear\` — セッションをリセット`,
-    `\`${PREFIX} help\` — このヘルプを表示`,
-    "",
-    "**添付ファイル:**",
-    "メッセージに画像やファイルを添付すると、Claudeに渡されます。",
-    "",
-    "**ワークスペース:**",
-    "カテゴリ内のチャンネルは自動的にワークスペースのディレクトリで作業します。",
-    "",
-    "**進捗通知:**",
-    "処理中はツール実行状況がリアルタイムで表示されます。",
-  ].join("\n");
-}
-
-// ========================================
 // 共通の応答送信処理
 // ========================================
 
 /**
- * ClaudeCodeの応答結果をDiscordに送信する共通関数
+ * ClaudeCodeの応答結果をDiscord Embedで送信する共通関数
  */
 async function sendResponse(
   responseText: string,
   channelId: string,
-  editFirstMessage: (content: string) => Promise<any>,
-  sendToChannel: (content: string) => Promise<any>,
+  editFirstMessage: (options: { embeds: EmbedBuilder[] }) => Promise<any>,
+  sendToChannel: (options: { embeds: EmbedBuilder[] }) => Promise<any>,
   sendFilesToChannel: (files: AttachmentBuilder[]) => Promise<any>
 ): Promise<void> {
   const workDir = sessionManager.resolveWorkDir(channelId);
@@ -540,22 +587,25 @@ async function sendResponse(
     (filePath) => new AttachmentBuilder(filePath, { name: basename(filePath) })
   );
 
-  const wsInfo = workspaceName ? `\n-# ワークスペース: ${workspaceName}` : "";
-  const attachInfo =
-    attachments.length > 0
-      ? `\n-# 添付: ${attachableFiles.map((f) => basename(f)).join(", ")}`
-      : "";
-  const footer = attachInfo + wsInfo;
+  // フッターテキストの構築
+  const footerParts: string[] = [];
+  if (attachableFiles.length > 0) {
+    footerParts.push(`添付: ${attachableFiles.map((f) => basename(f)).join(", ")}`);
+  }
+  if (workspaceName) {
+    footerParts.push(`ワークスペース: ${workspaceName}`);
+  }
+  const footerText = footerParts.join(" | ");
 
   // 最初のチャンクで元のメッセージを編集
-  await editFirstMessage(
-    chunks[0] + (chunks.length === 1 ? footer : "")
-  );
+  const firstEmbed = buildResponseEmbed(chunks[0], chunks.length === 1 ? footerText : undefined);
+  await editFirstMessage({ embeds: [firstEmbed] });
 
   // 残りのチャンクを追加送信
   for (let i = 1; i < chunks.length; i++) {
-    const suffix = i === chunks.length - 1 ? footer : "";
-    await sendToChannel(chunks[i] + suffix);
+    const isLast = i === chunks.length - 1;
+    const embed = buildResponseEmbed(chunks[i], isLast ? footerText : undefined);
+    await sendToChannel({ embeds: [embed] });
   }
 
   // 添付ファイルがあれば送信
@@ -602,7 +652,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
   if (!isUserAllowed(userId)) {
     await interaction.reply({
-      content: "このボットを使用する権限がありません。",
+      embeds: [buildErrorEmbed("このボットを使用する権限がありません。")],
       ephemeral: true,
     });
     return;
@@ -612,7 +662,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
   // /claude-help
   if (commandName === "claude-help") {
-    await interaction.reply({ content: getHelpText(), ephemeral: true });
+    await interaction.reply({ embeds: [buildHelpEmbed()], ephemeral: true });
     return;
   }
 
@@ -620,11 +670,14 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   if (commandName === "claude-clear") {
     const { cleared, savedFile } = sessionManager.clearSession(interaction.channelId);
     const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
-    await interaction.reply(
-      cleared
-        ? `セッションをクリアしました。新しい会話を始められます。${memoryNote}`
-        : "このチャンネルにはアクティブなセッションがありません。"
-    );
+    const clearEmbed = new EmbedBuilder()
+      .setColor(cleared ? EMBED_COLOR.success : EMBED_COLOR.info)
+      .setDescription(
+        cleared
+          ? `✅ セッションをクリアしました。新しい会話を始められます。${memoryNote}`
+          : "このチャンネルにはアクティブなセッションがありません。"
+      );
+    await interaction.reply({ embeds: [clearEmbed] });
     return;
   }
 
@@ -648,9 +701,10 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     };
     const displayName = modelNames[model] || model;
 
-    await interaction.reply(
-      `モデルを **${displayName}** に変更しました。\n次のメッセージからこのモデルが使用されます。`
-    );
+    const modelEmbed = new EmbedBuilder()
+      .setColor(EMBED_COLOR.success)
+      .setDescription(`✅ モデルを **${displayName}** に変更しました。\n次のメッセージからこのモデルが使用されます。`);
+    await interaction.reply({ embeds: [modelEmbed] });
     return;
   }
 
@@ -662,7 +716,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     // ディレクトリの存在チェック
     if (!existsSync(directory)) {
       await interaction.reply({
-        content: `ディレクトリが存在しません: \`${directory}\``,
+        embeds: [buildErrorEmbed(`ディレクトリが存在しません: \`${directory}\``)],
         ephemeral: true,
       });
       return;
@@ -671,7 +725,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     const guild = interaction.guild;
     if (!guild) {
       await interaction.reply({
-        content: "このコマンドはサーバー内でのみ使用できます。",
+        embeds: [buildErrorEmbed("このコマンドはサーバー内でのみ使用できます。")],
         ephemeral: true,
       });
       return;
@@ -713,16 +767,19 @@ client.on("interactionCreate", async (interaction: Interaction) => {
         categoryId: category.id,
       });
 
-      await interaction.editReply(
-        `ワークスペース **${name}** を登録しました。\n` +
-          `📁 ディレクトリ: \`${directory}\`\n` +
-          `📂 カテゴリ: ${category.name}\n\n` +
-          `このカテゴリ内のチャンネルでの操作は自動的にこのディレクトリで実行されます。`
-      );
+      const wsEmbed = new EmbedBuilder()
+        .setColor(EMBED_COLOR.success)
+        .setTitle(`✅ ワークスペース登録: ${name}`)
+        .setDescription("このカテゴリ内のチャンネルでの操作は自動的にこのディレクトリで実行されます。")
+        .addFields(
+          { name: "📁 ディレクトリ", value: `\`${directory}\``, inline: true },
+          { name: "📂 カテゴリ", value: category.name, inline: true }
+        );
+      await interaction.editReply({ embeds: [wsEmbed] });
     } catch (error) {
       const errorMsg =
         error instanceof Error ? error.message : "不明なエラー";
-      await interaction.editReply(`ワークスペースの作成に失敗: ${errorMsg}`);
+      await interaction.editReply({ embeds: [buildErrorEmbed(`ワークスペースの作成に失敗: ${errorMsg}`)] });
     }
     return;
   }
@@ -732,24 +789,26 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     const workspaces = sessionManager.getWorkspaces();
     if (workspaces.length === 0) {
       await interaction.reply({
-        content:
-          "登録されたワークスペースはありません。\n`/claude-workspace` で登録してください。",
+        embeds: [
+          new EmbedBuilder()
+            .setColor(EMBED_COLOR.info)
+            .setDescription("登録されたワークスペースはありません。\n`/claude-workspace` で登録してください。"),
+        ],
         ephemeral: true,
       });
       return;
     }
 
-    const list = workspaces
-      .map(
-        (ws) =>
-          `• **${ws.name}** → \`${ws.directory}\``
-      )
-      .join("\n");
-
-    await interaction.reply({
-      content: `**ワークスペース一覧:**\n${list}`,
-      ephemeral: true,
-    });
+    const wsListEmbed = new EmbedBuilder()
+      .setColor(EMBED_COLOR.info)
+      .setTitle("ワークスペース一覧")
+      .addFields(
+        workspaces.map((ws) => ({
+          name: ws.name,
+          value: `\`${ws.directory}\``,
+        }))
+      );
+    await interaction.reply({ embeds: [wsListEmbed], ephemeral: true });
     return;
   }
 
@@ -773,8 +832,8 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     await interaction.deferReply();
 
     // 進捗更新用コールバック（Discord表示 + コンソールログ）
-    const { handler: onProgress, finish: finishProgress } = createProgressUpdater((content) =>
-      interaction.editReply(content)
+    const { handler: onProgress, finish: finishProgress } = createProgressUpdater((options) =>
+      interaction.editReply(options)
     );
     const onProgressWithLog = (event: ProgressEvent) => {
       logProgress(event);
@@ -795,8 +854,8 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       await sendResponse(
         responseText,
         interaction.channelId,
-        (content) => interaction.editReply(content),
-        (content) => (interaction.channel as TextChannel).send(content),
+        (options) => interaction.editReply(options),
+        (options) => (interaction.channel as TextChannel).send(options),
         (files) => (interaction.channel as TextChannel).send({ files })
       );
     } catch (error) {
@@ -804,7 +863,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
         error instanceof Error ? error.message : "不明なエラー";
       log("❌ エラー", C.red, errorMessage);
       console.error(error);
-      await interaction.editReply(`エラーが発生しました: ${errorMessage}`);
+      await interaction.editReply({ embeds: [buildErrorEmbed(errorMessage)] });
     }
   }
 });
@@ -836,7 +895,9 @@ client.on("messageCreate", async (message: Message) => {
   }
 
   if (!isUserAllowed(message.author.id)) {
-    await message.reply("このボットを使用する権限がありません。");
+    await message.reply({
+      embeds: [buildErrorEmbed("このボットを使用する権限がありません。")],
+    });
     return;
   }
 
@@ -844,25 +905,32 @@ client.on("messageCreate", async (message: Message) => {
   if (prompt === "clear" || prompt === "リセット") {
     const { cleared, savedFile } = sessionManager.clearSession(message.channelId);
     const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
-    await message.reply(
-      cleared
-        ? `セッションをクリアしました。新しい会話を始められます。${memoryNote}`
-        : "このチャンネルにはアクティブなセッションがありません。"
-    );
+    const clearMsgEmbed = new EmbedBuilder()
+      .setColor(cleared ? EMBED_COLOR.success : EMBED_COLOR.info)
+      .setDescription(
+        cleared
+          ? `✅ セッションをクリアしました。新しい会話を始められます。${memoryNote}`
+          : "このチャンネルにはアクティブなセッションがありません。"
+      );
+    await message.reply({ embeds: [clearMsgEmbed] });
     return;
   }
 
   // ヘルプコマンド
   if (prompt === "help" || prompt === "ヘルプ") {
-    await message.reply(getHelpText());
+    await message.reply({ embeds: [buildHelpEmbed()] });
     return;
   }
 
   // プロンプトが空で添付もない場合
   if (!prompt && message.attachments.size === 0) {
-    await message.reply(
-      `メッセージを入力してください。例: \`${PREFIX} このプロジェクトの構成を教えて\``
-    );
+    await message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(EMBED_COLOR.info)
+          .setDescription(`メッセージを入力してください。例: \`${PREFIX} このプロジェクトの構成を教えて\``),
+      ],
+    });
     return;
   }
 
@@ -882,12 +950,18 @@ client.on("messageCreate", async (message: Message) => {
     : message.channelId;
   logUserMessage(message.author.username, message.author.id, channelInfo, prompt);
 
-  // 処理中の表示
-  const thinkingMessage = await message.reply("考え中...");
+  // 処理中の表示（Embed）
+  const thinkingMessage = await message.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(EMBED_COLOR.progress)
+        .setDescription("考え中..."),
+    ],
+  });
 
   // 進捗更新用コールバック（Discord表示 + コンソールログ）
-  const { handler: onProgress, finish: finishProgress } = createProgressUpdater((content) =>
-    thinkingMessage.edit(content)
+  const { handler: onProgress, finish: finishProgress } = createProgressUpdater((options) =>
+    thinkingMessage.edit(options)
   );
   const onProgressWithLog = (event: ProgressEvent) => {
     logProgress(event);
@@ -915,8 +989,8 @@ client.on("messageCreate", async (message: Message) => {
     await sendResponse(
       responseText,
       message.channelId,
-      (content) => thinkingMessage.edit(content),
-      (content) => channel.send(content),
+      (options) => thinkingMessage.edit(options),
+      (options) => channel.send(options),
       (files) => channel.send({ files })
     );
   } catch (error) {
@@ -924,7 +998,7 @@ client.on("messageCreate", async (message: Message) => {
       error instanceof Error ? error.message : "不明なエラー";
     log("❌ エラー", C.red, errorMessage);
     console.error(error);
-    await thinkingMessage.edit(`エラーが発生しました: ${errorMessage}`);
+    await thinkingMessage.edit({ embeds: [buildErrorEmbed(errorMessage)] });
   }
 });
 
