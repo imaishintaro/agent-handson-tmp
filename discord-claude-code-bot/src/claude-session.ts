@@ -129,7 +129,10 @@ export class ClaudeSessionManager {
     const systemMdPath = join(this.defaultWorkDir, "system.md");
     if (existsSync(systemMdPath)) {
       try {
-        return readFileSync(systemMdPath, "utf-8").trim();
+        const content = readFileSync(systemMdPath, "utf-8").trim();
+        console.log(`[DEBUG] system.md 読み込み: ${systemMdPath}`);
+        console.log(`[DEBUG] 内容: ${content.slice(0, 100)}...`);
+        return content;
       } catch {
         console.error("system.md の読み込みに失敗しました");
       }
@@ -232,21 +235,23 @@ export class ClaudeSessionManager {
     // チャンネルに対応する作業ディレクトリを解決
     const workDir = this.resolveWorkDir(channelId);
 
-    // 追加システムプロンプト（性格・口調などのカスタマイズ）
+    // system.mdの内容を取得し、新規セッション開始時のみプロンプト先頭に注入する
+    // （appendSystemPromptはClaude Codeプリセットに上書きされるため、直接注入する）
     const extraPrompt = this.getExtraSystemPrompt();
+    const isNewSession = !sessionId;
+    const fullPrompt = (extraPrompt && isNewSession)
+      ? `<system_instructions>\n${extraPrompt}\n</system_instructions>\n\n${prompt}`
+      : prompt;
 
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
       cwd: workDir,
       model,
       maxTurns: 50,
-      // Claude Codeのシステムプロンプトとツールを使用
-      // 追加プロンプトがあれば末尾に付加して性格をカスタマイズ
       systemPrompt: {
         type: "preset" as const,
         preset: "claude_code" as const,
       },
-      ...(extraPrompt && { appendSystemPrompt: extraPrompt }),
       tools: {
         type: "preset" as const,
         preset: "claude_code" as const,
@@ -267,7 +272,7 @@ export class ClaudeSessionManager {
     let newSessionId = "";
 
     // Agent SDKのストリームを処理
-    for await (const message of query({ prompt, options })) {
+    for await (const message of query({ prompt: fullPrompt, options })) {
       // 進捗イベントをコールバックに通知
       this.handleProgressEvent(message, onProgress);
 
