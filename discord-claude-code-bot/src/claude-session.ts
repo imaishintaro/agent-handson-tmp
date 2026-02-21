@@ -2,6 +2,10 @@ import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
+// ボット本体のルートディレクトリ（identify.md / context.md の置き場所）
+// dist/ の一つ上がプロジェクトルート
+const BOT_ROOT = join(__dirname, "..");
+
 /**
  * 進捗イベントの型定義
  * ストリーム中のツール実行状況やタスク進捗をDiscordに通知するために使う
@@ -129,9 +133,10 @@ export class ClaudeSessionManager {
   private getExtraSystemPrompt(): string {
     const parts: string[] = [];
 
+    // ボットのルートから読み込む（WORKDIRのworkspaceフォルダとは別）
     const files: { path: string; label: string }[] = [
-      { path: join(this.defaultWorkDir, "identify.md"), label: "性格・口調" },
-      { path: join(this.defaultWorkDir, "context.md"), label: "プロジェクト情報" },
+      { path: join(BOT_ROOT, "identify.md"), label: "性格・口調" },
+      { path: join(BOT_ROOT, "context.md"), label: "プロジェクト情報" },
     ];
 
     for (const { path, label } of files) {
