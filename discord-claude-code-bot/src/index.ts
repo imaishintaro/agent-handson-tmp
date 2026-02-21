@@ -325,6 +325,80 @@ function createProgressUpdater(
 }
 
 // ========================================
+// コンソールロギング
+// ========================================
+
+/** ANSIカラーコード */
+const C = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  magenta: "\x1b[35m",
+  red: "\x1b[31m",
+  gray: "\x1b[90m",
+};
+
+/**
+ * タイムスタンプ付きのログ出力
+ */
+function log(label: string, color: string, ...args: string[]): void {
+  const time = new Date().toLocaleTimeString("ja-JP");
+  console.log(`${C.gray}[${time}]${C.reset} ${color}${C.bold}${label}${C.reset}`, ...args);
+}
+
+/**
+ * ユーザーのメッセージ受信をログ出力
+ */
+function logUserMessage(
+  username: string,
+  userId: string,
+  channelInfo: string,
+  prompt: string
+): void {
+  log("📨 受信", C.cyan, `${username} (${userId}) @ ${channelInfo}`);
+  console.log(`${C.gray}   └─ ${C.reset}${prompt.slice(0, 200)}${prompt.length > 200 ? "..." : ""}`);
+}
+
+/**
+ * Claudeの進捗イベントをログ出力
+ */
+function logProgress(event: ProgressEvent): void {
+  switch (event.type) {
+    case "tool_progress":
+      log("🔧 ツール実行", C.yellow,
+        `${toolDisplayName(event.toolName)} (${Math.floor(event.elapsedSeconds)}秒経過)`
+      );
+      break;
+    case "tool_summary":
+      log("✅ ツール完了", C.green, event.summary);
+      break;
+    case "task_started":
+      log("🔄 サブタスク", C.blue, event.description);
+      break;
+    case "task_completed":
+      const icon = event.status === "completed" ? "✅" : "❌";
+      log(`${icon} タスク完了`, event.status === "completed" ? C.green : C.red,
+        `[${event.status}] ${event.summary}`
+      );
+      break;
+  }
+}
+
+/**
+ * Claudeの応答をログ出力
+ */
+function logResponse(responseText: string, costUsd: number): void {
+  const preview = responseText.slice(0, 200).replace(/\n/g, " ");
+  log("💬 応答", C.magenta, `${preview}${responseText.length > 200 ? "..." : ""}`);
+  if (process.env.OPENROUTER_API_KEY && costUsd > 0) {
+    log("💰 コスト", C.gray, `$${costUsd.toFixed(4)}`);
+  }
+}
+
+// ========================================
 // ヘルプテキスト
 // ========================================
 
@@ -598,21 +672,30 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       );
     }
 
+    // ユーザーメッセージをコンソールに出力
+    const channelName = channel && "name" in channel ? `#${channel.name}` : "スラッシュコマンド";
+    logUserMessage(interaction.user.username, interaction.user.id, channelName, prompt);
+
     await interaction.deferReply();
 
-    // 進捗更新用コールバック
+    // 進捗更新用コールバック（Discord表示 + コンソールログ）
     const onProgress = createProgressUpdater((content) =>
       interaction.editReply(content)
     );
+    const onProgressWithLog = (event: ProgressEvent) => {
+      logProgress(event);
+      onProgress(event);
+    };
 
     try {
       const { result, costUsd } = await sessionManager.sendPrompt(
         interaction.channelId,
         prompt,
-        onProgress
+        onProgressWithLog
       );
 
       const responseText = result || "（応答なし）";
+      logResponse(responseText, costUsd);
 
       await sendResponse(
         responseText,
@@ -625,7 +708,8 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "不明なエラー";
-      console.error("Claude Code エラー:", error);
+      log("❌ エラー", C.red, errorMessage);
+      console.error(error);
       await interaction.editReply(`エラーが発生しました: ${errorMessage}`);
     }
   }
@@ -695,13 +779,25 @@ client.on("messageCreate", async (message: Message) => {
     );
   }
 
+  // ユーザーメッセージをコンソールに出力
+  const channelInfo = isDM
+    ? "DM"
+    : "name" in message.channel
+    ? `#${(message.channel as any).name}`
+    : message.channelId;
+  logUserMessage(message.author.username, message.author.id, channelInfo, prompt);
+
   // 処理中の表示
   const thinkingMessage = await message.reply("考え中...");
 
-  // 進捗更新用コールバック
+  // 進捗更新用コールバック（Discord表示 + コンソールログ）
   const onProgress = createProgressUpdater((content) =>
     thinkingMessage.edit(content)
   );
+  const onProgressWithLog = (event: ProgressEvent) => {
+    logProgress(event);
+    onProgress(event);
+  };
 
   try {
     // 添付ファイルを処理してプロンプトに追加
@@ -712,10 +808,12 @@ client.on("messageCreate", async (message: Message) => {
     const { result, costUsd } = await sessionManager.sendPrompt(
       message.channelId,
       fullPrompt,
-      onProgress
+      onProgressWithLog
     );
 
     const responseText = result || "（応答なし）";
+    logResponse(responseText, costUsd);
+
     const channel = message.channel as TextChannel;
 
     await sendResponse(
@@ -729,7 +827,8 @@ client.on("messageCreate", async (message: Message) => {
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : "不明なエラー";
-    console.error("Claude Code エラー:", error);
+    log("❌ エラー", C.red, errorMessage);
+    console.error(error);
     await thinkingMessage.edit(`エラーが発生しました: ${errorMessage}`);
   }
 });
