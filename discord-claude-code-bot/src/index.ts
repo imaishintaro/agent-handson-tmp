@@ -1,4 +1,5 @@
 import {
+  AttachmentBuilder,
   Client,
   GatewayIntentBits,
   Message,
@@ -6,6 +7,8 @@ import {
   TextChannel,
 } from "discord.js";
 import { config } from "dotenv";
+import { existsSync, statSync } from "fs";
+import { resolve, basename } from "path";
 import { ClaudeSessionManager } from "./claude-session";
 
 // 環境変数を読み込む
@@ -82,6 +85,50 @@ function splitMessage(text: string): string[] {
   }
 
   return chunks;
+}
+
+// Discordのファイルアップロード上限（無料サーバー: 25MB）
+const DISCORD_FILE_SIZE_LIMIT = 25 * 1024 * 1024;
+
+/**
+ * レスポンステキストからファイルパスを抽出し、実在するファイルのみ返す
+ * バッククォート内のパスや、よく使われるパターンを検出する
+ */
+function extractAttachableFiles(text: string, workDir: string): string[] {
+  const filePaths = new Set<string>();
+
+  // バッククォート内のファイルパスを抽出（例: `src/index.ts` や `/home/user/file.txt`）
+  const backtickPattern = /`([^`\s]+\.[a-zA-Z0-9]+)`/g;
+  let match;
+  while ((match = backtickPattern.exec(text)) !== null) {
+    filePaths.add(match[1]);
+  }
+
+  // 検出したパスを検証し、実在するファイルのみ返す
+  const validFiles: string[] = [];
+  for (const filePath of filePaths) {
+    // 絶対パスまたは作業ディレクトリからの相対パスに解決
+    const absolutePath = resolve(workDir, filePath);
+
+    try {
+      if (!existsSync(absolutePath)) continue;
+
+      const stats = statSync(absolutePath);
+      // ディレクトリは除外
+      if (!stats.isFile()) continue;
+      // サイズ上限チェック
+      if (stats.size > DISCORD_FILE_SIZE_LIMIT) continue;
+      // 空ファイルは除外
+      if (stats.size === 0) continue;
+
+      validFiles.push(absolutePath);
+    } catch {
+      // アクセスエラーなどは無視
+      continue;
+    }
+  }
+
+  return validFiles;
 }
 
 /**
@@ -186,15 +233,36 @@ client.on("messageCreate", async (message: Message) => {
     const responseText = result || "（応答なし）";
     const chunks = splitMessage(responseText);
 
+    // レスポンスからファイルパスを抽出し、添付ファイルを準備
+    const attachableFiles = extractAttachableFiles(responseText, WORK_DIR);
+    const attachments = attachableFiles.map(
+      (filePath) => new AttachmentBuilder(filePath, { name: basename(filePath) })
+    );
+
     // 最初のチャンクで「考え中...」メッセージを更新
     const costInfo =
       costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
-    await thinkingMessage.edit(chunks[0] + (chunks.length === 1 ? costInfo : ""));
+
+    // 添付ファイルの案内テキスト
+    const attachInfo =
+      attachments.length > 0
+        ? `\n-# 添付ファイル: ${attachableFiles.map((f) => basename(f)).join(", ")}`
+        : "";
+
+    await thinkingMessage.edit(
+      chunks[0] + (chunks.length === 1 ? attachInfo + costInfo : "")
+    );
 
     // 残りのチャンクを追加メッセージとして送信
+    const channel = message.channel as TextChannel;
     for (let i = 1; i < chunks.length; i++) {
-      const suffix = i === chunks.length - 1 ? costInfo : "";
-      await message.channel.send(chunks[i] + suffix);
+      const suffix = i === chunks.length - 1 ? attachInfo + costInfo : "";
+      await channel.send(chunks[i] + suffix);
+    }
+
+    // 添付ファイルがあれば送信
+    if (attachments.length > 0) {
+      await channel.send({ files: attachments });
     }
   } catch (error) {
     const errorMessage =
