@@ -2,6 +2,7 @@ import {
   AttachmentBuilder,
   Client,
   GatewayIntentBits,
+  Interaction,
   Message,
   Partials,
   TextChannel,
@@ -27,7 +28,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 
 // 設定値
-const MODEL = process.env.MODEL || "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = process.env.MODEL || "claude-sonnet-4-20250514";
 const WORK_DIR = process.env.WORK_DIR || process.cwd();
 const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
   ? process.env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
@@ -36,11 +37,11 @@ const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
 // Discordの1メッセージあたりの文字数上限
 const DISCORD_MAX_LENGTH = 2000;
 
-// ボットへのプレフィックス
+// ボットへのプレフィックス（従来方式も維持）
 const PREFIX = "!claude";
 
 // セッションマネージャーの初期化
-const sessionManager = new ClaudeSessionManager(WORK_DIR, MODEL);
+const sessionManager = new ClaudeSessionManager(WORK_DIR, DEFAULT_MODEL);
 
 // Discordクライアントの初期化
 const client = new Client({
@@ -140,18 +141,162 @@ function isUserAllowed(userId: string): boolean {
   return ALLOWED_USER_IDS.includes(userId);
 }
 
+/**
+ * ヘルプテキストを生成する
+ */
+function getHelpText(): string {
+  return [
+    "**Discord Claude Code Bot**",
+    "",
+    "Claude Codeの機能をDiscordから利用できます。",
+    "ファイルの読み書き、コード生成、Git操作などが可能です。",
+    "",
+    "**スラッシュコマンド:**",
+    "`/claude prompt:<メッセージ>` — Claude Codeにメッセージを送る",
+    "`/claude-clear` — セッションをリセット",
+    "`/claude-model model:<モデル>` — モデルを変更",
+    "`/claude-help` — このヘルプを表示",
+    "",
+    "**プレフィックス方式（従来互換）:**",
+    `\`${PREFIX} <メッセージ>\` — Claude Codeにメッセージを送る`,
+    `\`${PREFIX} clear\` — セッションをリセット`,
+    `\`${PREFIX} help\` — このヘルプを表示`,
+    "",
+    "**例:**",
+    "`/claude prompt:このプロジェクトの構成を教えて`",
+    "`/claude prompt:auth.tsのバグを修正して`",
+    "",
+    `チャンネルごとに会話が継続されます。`,
+  ].join("\n");
+}
+
 // ボット起動時の処理
 client.once("ready", () => {
   console.log(`ボットが起動しました: ${client.user?.tag}`);
   console.log(`作業ディレクトリ: ${WORK_DIR}`);
-  console.log(`モデル: ${MODEL}`);
+  console.log(`デフォルトモデル: ${DEFAULT_MODEL}`);
   console.log(
     `許可ユーザー: ${ALLOWED_USER_IDS.length === 0 ? "全員" : ALLOWED_USER_IDS.join(", ")}`
   );
-  console.log(`使い方: "${PREFIX} <メッセージ>" でClaude Codeに話しかけます`);
+  console.log("スラッシュコマンド: /claude, /claude-clear, /claude-model, /claude-help");
+  console.log(`プレフィックス方式: "${PREFIX} <メッセージ>" も引き続き使えます`);
 });
 
-// メッセージ受信時の処理
+// ========================================
+// スラッシュコマンドの処理
+// ========================================
+client.on("interactionCreate", async (interaction: Interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const userId = interaction.user.id;
+
+  // ユーザー権限チェック
+  if (!isUserAllowed(userId)) {
+    await interaction.reply({
+      content: "このボットを使用する権限がありません。",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const { commandName } = interaction;
+
+  // /claude-help — ヘルプ表示
+  if (commandName === "claude-help") {
+    await interaction.reply({ content: getHelpText(), ephemeral: true });
+    return;
+  }
+
+  // /claude-clear — セッションリセット
+  if (commandName === "claude-clear") {
+    const cleared = sessionManager.clearSession(interaction.channelId);
+    await interaction.reply(
+      cleared
+        ? "セッションをクリアしました。新しい会話を始められます。"
+        : "このチャンネルにはアクティブなセッションがありません。"
+    );
+    return;
+  }
+
+  // /claude-model — モデル変更
+  if (commandName === "claude-model") {
+    const model = interaction.options.getString("model", true);
+    sessionManager.setModel(interaction.channelId, model);
+
+    // モデル名を表示用にマッピング
+    const modelNames: Record<string, string> = {
+      "claude-sonnet-4-20250514": "Sonnet (高速・バランス型)",
+      "claude-opus-4-20250514": "Opus (最高性能)",
+      "claude-haiku-4-5-20251001": "Haiku (最速・軽量)",
+    };
+    const displayName = modelNames[model] || model;
+
+    await interaction.reply(
+      `モデルを **${displayName}** に変更しました。\n次のメッセージからこのモデルが使用されます。`
+    );
+    return;
+  }
+
+  // /claude — メッセージ送信
+  if (commandName === "claude") {
+    const prompt = interaction.options.getString("prompt", true);
+
+    // スラッシュコマンドは3秒以内に応答が必要なので、deferReplyで猶予を確保
+    await interaction.deferReply();
+
+    try {
+      const { result, costUsd } = await sessionManager.sendPrompt(
+        interaction.channelId,
+        prompt
+      );
+
+      const responseText = result || "（応答なし）";
+      const chunks = splitMessage(responseText);
+
+      // ファイル添付の準備
+      const attachableFiles = extractAttachableFiles(responseText, WORK_DIR);
+      const attachments = attachableFiles.map(
+        (filePath) =>
+          new AttachmentBuilder(filePath, { name: basename(filePath) })
+      );
+
+      const costInfo =
+        costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
+      const attachInfo =
+        attachments.length > 0
+          ? `\n-# 添付ファイル: ${attachableFiles.map((f) => basename(f)).join(", ")}`
+          : "";
+
+      // 最初のチャンクでdeferReplyに応答
+      await interaction.editReply(
+        chunks[0] + (chunks.length === 1 ? attachInfo + costInfo : "")
+      );
+
+      // 残りのチャンクを追加メッセージとして送信
+      if (interaction.channel) {
+        const channel = interaction.channel as TextChannel;
+        for (let i = 1; i < chunks.length; i++) {
+          const suffix = i === chunks.length - 1 ? attachInfo + costInfo : "";
+          await channel.send(chunks[i] + suffix);
+        }
+
+        // 添付ファイルがあれば送信
+        if (attachments.length > 0) {
+          await channel.send({ files: attachments });
+        }
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "不明なエラー";
+      console.error("Claude Code エラー:", error);
+      await interaction.editReply(`エラーが発生しました: ${errorMessage}`);
+    }
+  }
+});
+
+// ========================================
+// プレフィックス方式の処理（従来互換）
+// ========================================
 client.on("messageCreate", async (message: Message) => {
   // ボット自身のメッセージは無視
   if (message.author.bot) return;
@@ -189,25 +334,7 @@ client.on("messageCreate", async (message: Message) => {
 
   // ヘルプコマンド
   if (prompt === "help" || prompt === "ヘルプ") {
-    const helpText = [
-      "**Discord Claude Code Bot**",
-      "",
-      "Claude Codeの機能をDiscordから利用できます。",
-      "ファイルの読み書き、コード生成、Git操作などが可能です。",
-      "",
-      "**使い方:**",
-      `\`${PREFIX} <メッセージ>\` — Claude Codeにメッセージを送る`,
-      `\`${PREFIX} clear\` — セッションをリセット`,
-      `\`${PREFIX} help\` — このヘルプを表示`,
-      "",
-      "**例:**",
-      `\`${PREFIX} このプロジェクトの構成を教えて\``,
-      `\`${PREFIX} auth.tsのバグを修正して\``,
-      `\`${PREFIX} テストを実行して\``,
-      "",
-      `チャンネルごとに会話が継続されます。`,
-    ].join("\n");
-    await message.reply(helpText);
+    await message.reply(getHelpText());
     return;
   }
 

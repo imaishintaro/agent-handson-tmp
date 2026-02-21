@@ -1,0 +1,74 @@
+import { REST, Routes, SlashCommandBuilder } from "discord.js";
+import { config } from "dotenv";
+
+// 環境変数を読み込む
+config();
+
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+
+if (!DISCORD_TOKEN || !CLIENT_ID) {
+  console.error(
+    "エラー: DISCORD_TOKEN と DISCORD_CLIENT_ID を設定してください"
+  );
+  process.exit(1);
+}
+
+// スラッシュコマンドの定義
+const commands = [
+  // /claude — Claude Codeにメッセージを送る
+  new SlashCommandBuilder()
+    .setName("claude")
+    .setDescription("Claude Codeにメッセージを送る")
+    .addStringOption((option) =>
+      option
+        .setName("prompt")
+        .setDescription("Claude Codeに送るメッセージ")
+        .setRequired(true)
+    ),
+
+  // /claude-clear — セッションをリセットする
+  new SlashCommandBuilder()
+    .setName("claude-clear")
+    .setDescription("このチャンネルのClaude Codeセッションをリセットする"),
+
+  // /claude-model — 使用するモデルを変更する
+  new SlashCommandBuilder()
+    .setName("claude-model")
+    .setDescription("Claude Codeで使用するモデルを変更する")
+    .addStringOption((option) =>
+      option
+        .setName("model")
+        .setDescription("使用するモデル")
+        .setRequired(true)
+        .addChoices(
+          { name: "Sonnet (高速・バランス型)", value: "claude-sonnet-4-20250514" },
+          { name: "Opus (最高性能)", value: "claude-opus-4-20250514" },
+          { name: "Haiku (最速・軽量)", value: "claude-haiku-4-5-20251001" }
+        )
+    ),
+
+  // /claude-help — ヘルプを表示する
+  new SlashCommandBuilder()
+    .setName("claude-help")
+    .setDescription("Claude Code Botの使い方を表示する"),
+].map((command) => command.toJSON());
+
+// コマンドをDiscordに登録する
+const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+
+(async () => {
+  try {
+    console.log("スラッシュコマンドを登録中...");
+
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+
+    console.log("スラッシュコマンドの登録が完了しました:");
+    console.log("  /claude         — Claude Codeにメッセージを送る");
+    console.log("  /claude-clear   — セッションをリセット");
+    console.log("  /claude-model   — モデルを変更");
+    console.log("  /claude-help    — ヘルプを表示");
+  } catch (error) {
+    console.error("コマンド登録エラー:", error);
+  }
+})();

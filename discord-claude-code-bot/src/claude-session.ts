@@ -7,12 +7,14 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 export class ClaudeSessionManager {
   // チャンネルID → セッションIDのマップ
   private sessions: Map<string, string> = new Map();
+  // チャンネルID → モデル名のマップ（チャンネルごとのモデル設定）
+  private channelModels: Map<string, string> = new Map();
   private workDir: string;
-  private model: string;
+  private defaultModel: string;
 
-  constructor(workDir: string, model: string) {
+  constructor(workDir: string, defaultModel: string) {
     this.workDir = workDir;
-    this.model = model;
+    this.defaultModel = defaultModel;
   }
 
   /**
@@ -25,10 +27,13 @@ export class ClaudeSessionManager {
   ): Promise<{ result: string; costUsd: number }> {
     const sessionId = this.sessions.get(channelId);
 
+    // チャンネルごとのモデル設定を取得（未設定ならデフォルト）
+    const model = this.channelModels.get(channelId) || this.defaultModel;
+
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
       cwd: this.workDir,
-      model: this.model,
+      model,
       maxTurns: 10,
       // Claude Codeのシステムプロンプトとツールを使用
       systemPrompt: {
@@ -93,10 +98,28 @@ export class ClaudeSessionManager {
   }
 
   /**
+   * チャンネルのモデルを変更する
+   * セッションもクリアして新しいモデルで再開する
+   */
+  setModel(channelId: string, model: string): void {
+    this.channelModels.set(channelId, model);
+    // モデル変更時はセッションをリセット（新モデルで開始するため）
+    this.sessions.delete(channelId);
+  }
+
+  /**
+   * チャンネルで使用中のモデル名を取得する
+   */
+  getModel(channelId: string): string {
+    return this.channelModels.get(channelId) || this.defaultModel;
+  }
+
+  /**
    * 全セッションをクリアする
    */
   clearAllSessions(): void {
     this.sessions.clear();
+    this.channelModels.clear();
   }
 
   /**
