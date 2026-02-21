@@ -1,4 +1,6 @@
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
 
 /**
  * 進捗イベントの型定義
@@ -50,6 +52,14 @@ export type WorkspaceConfig = {
   categoryId: string;
 };
 
+/** 永続化するセッションデータの型 */
+type PersistedData = {
+  sessions: Record<string, string>;
+  channelModels: Record<string, string>;
+  workspaces: Record<string, WorkspaceConfig>;
+  channelCategoryCache: Record<string, string | null>;
+};
+
 /**
  * チャンネルごとのClaude Codeセッションを管理するクラス
  * セッションIDを保持し、会話の継続を可能にする
@@ -66,10 +76,49 @@ export class ClaudeSessionManager {
   private channelCategoryCache: Map<string, string | null> = new Map();
   private defaultWorkDir: string;
   private defaultModel: string;
+  // セッションデータの保存先ファイルパス
+  private persistPath: string;
 
   constructor(workDir: string, defaultModel: string) {
     this.defaultWorkDir = workDir;
     this.defaultModel = defaultModel;
+    this.persistPath = join(workDir, ".sessions.json");
+    this.load();
+  }
+
+  /**
+   * セッションデータをファイルから読み込む
+   */
+  private load(): void {
+    if (!existsSync(this.persistPath)) return;
+    try {
+      const raw = readFileSync(this.persistPath, "utf-8");
+      const data: PersistedData = JSON.parse(raw);
+      this.sessions = new Map(Object.entries(data.sessions || {}));
+      this.channelModels = new Map(Object.entries(data.channelModels || {}));
+      this.workspaces = new Map(Object.entries(data.workspaces || {}));
+      this.channelCategoryCache = new Map(Object.entries(data.channelCategoryCache || {}));
+      console.log(`セッションデータを読み込みました（${this.sessions.size}件）`);
+    } catch {
+      console.error("セッションデータの読み込みに失敗しました（新規作成します）");
+    }
+  }
+
+  /**
+   * セッションデータをファイルに保存する
+   */
+  private save(): void {
+    try {
+      const data: PersistedData = {
+        sessions: Object.fromEntries(this.sessions),
+        channelModels: Object.fromEntries(this.channelModels),
+        workspaces: Object.fromEntries(this.workspaces),
+        channelCategoryCache: Object.fromEntries(this.channelCategoryCache),
+      };
+      writeFileSync(this.persistPath, JSON.stringify(data, null, 2), "utf-8");
+    } catch {
+      console.error("セッションデータの保存に失敗しました");
+    }
   }
 
   /**
@@ -88,13 +137,16 @@ export class ClaudeSessionManager {
    */
   addWorkspace(config: WorkspaceConfig): void {
     this.workspaces.set(config.categoryId, config);
+    this.save();
   }
 
   /**
    * ワークスペースを削除する
    */
   removeWorkspace(categoryId: string): boolean {
-    return this.workspaces.delete(categoryId);
+    const result = this.workspaces.delete(categoryId);
+    this.save();
+    return result;
   }
 
   /**
@@ -116,6 +168,7 @@ export class ClaudeSessionManager {
    */
   setChannelCategory(channelId: string, categoryId: string | null): void {
     this.channelCategoryCache.set(channelId, categoryId);
+    this.save();
   }
 
   /**
@@ -236,9 +289,10 @@ export class ClaudeSessionManager {
       }
     }
 
-    // セッションIDを更新
+    // セッションIDを更新して永続化
     if (newSessionId) {
       this.sessions.set(channelId, newSessionId);
+      this.save();
     }
 
     return { result: resultText, costUsd };
@@ -330,7 +384,9 @@ export class ClaudeSessionManager {
    * チャンネルのセッションをクリアする
    */
   clearSession(channelId: string): boolean {
-    return this.sessions.delete(channelId);
+    const result = this.sessions.delete(channelId);
+    this.save();
+    return result;
   }
 
   /**
@@ -341,6 +397,7 @@ export class ClaudeSessionManager {
     this.channelModels.set(channelId, model);
     // モデル変更時はセッションをリセット（新モデルで開始するため）
     this.sessions.delete(channelId);
+    this.save();
   }
 
   /**
