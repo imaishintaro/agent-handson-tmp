@@ -122,9 +122,18 @@ export class ClaudeSessionManager {
   }
 
   /**
-   * 追加システムプロンプトを取得する（環境変数から）
+   * 追加システムプロンプトを取得する
+   * 作業ディレクトリの system.md を優先し、なければ環境変数 SYSTEM_PROMPT を使う
    */
   private getExtraSystemPrompt(): string {
+    const systemMdPath = join(this.defaultWorkDir, "system.md");
+    if (existsSync(systemMdPath)) {
+      try {
+        return readFileSync(systemMdPath, "utf-8").trim();
+      } catch {
+        console.error("system.md の読み込みに失敗しました");
+      }
+    }
     return process.env.SYSTEM_PROMPT || "";
   }
 

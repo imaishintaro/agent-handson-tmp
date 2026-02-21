@@ -568,6 +568,16 @@ client.once("ready", () => {
   console.log(
     `許可ユーザー: ${ALLOWED_USER_IDS.length === 0 ? "全員" : ALLOWED_USER_IDS.join(", ")}`
   );
+
+  // システムプロンプトの読み込み元を表示
+  const systemMdPath = `${WORK_DIR}/system.md`;
+  if (existsSync(systemMdPath)) {
+    console.log(`システムプロンプト: system.md を使用 (${systemMdPath})`);
+  } else if (process.env.SYSTEM_PROMPT) {
+    console.log(`システムプロンプト: 環境変数 SYSTEM_PROMPT を使用`);
+  } else {
+    console.log(`システムプロンプト: デフォルト（未設定）`);
+  }
 });
 
 // ========================================
