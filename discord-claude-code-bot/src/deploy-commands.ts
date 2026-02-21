@@ -48,6 +48,28 @@ const commands = [
         )
     ),
 
+  // /claude-workspace — ワークスペースを登録する
+  new SlashCommandBuilder()
+    .setName("claude-workspace")
+    .setDescription("ワークスペースを登録してDiscordカテゴリと紐付ける")
+    .addStringOption((option) =>
+      option
+        .setName("name")
+        .setDescription("ワークスペース名（カテゴリ名になります）")
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("directory")
+        .setDescription("作業ディレクトリの絶対パス")
+        .setRequired(true)
+    ),
+
+  // /claude-workspaces — ワークスペース一覧を表示する
+  new SlashCommandBuilder()
+    .setName("claude-workspaces")
+    .setDescription("登録済みワークスペースの一覧を表示する"),
+
   // /claude-help — ヘルプを表示する
   new SlashCommandBuilder()
     .setName("claude-help")
@@ -64,10 +86,12 @@ const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 
     console.log("スラッシュコマンドの登録が完了しました:");
-    console.log("  /claude         — Claude Codeにメッセージを送る");
-    console.log("  /claude-clear   — セッションをリセット");
-    console.log("  /claude-model   — モデルを変更");
-    console.log("  /claude-help    — ヘルプを表示");
+    console.log("  /claude            — Claude Codeにメッセージを送る");
+    console.log("  /claude-clear      — セッションをリセット");
+    console.log("  /claude-model      — モデルを変更");
+    console.log("  /claude-workspace  — ワークスペースを登録");
+    console.log("  /claude-workspaces — ワークスペース一覧");
+    console.log("  /claude-help       — ヘルプを表示");
   } catch (error) {
     console.error("コマンド登録エラー:", error);
   }

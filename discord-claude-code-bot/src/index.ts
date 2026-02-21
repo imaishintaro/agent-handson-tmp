@@ -1,16 +1,22 @@
 import {
   AttachmentBuilder,
+  CategoryChannel,
+  ChannelType,
   Client,
+  Collection,
   GatewayIntentBits,
-  Interaction,
-  Message,
+  type GuildBasedChannel,
+  type Interaction,
+  type Message,
   Partials,
-  TextChannel,
+  type TextChannel,
 } from "discord.js";
 import { config } from "dotenv";
-import { existsSync, statSync } from "fs";
-import { resolve, basename } from "path";
-import { ClaudeSessionManager } from "./claude-session";
+import { createWriteStream, existsSync, mkdirSync, statSync } from "fs";
+import { pipeline } from "stream/promises";
+import { Readable } from "stream";
+import { resolve, basename, join } from "path";
+import { ClaudeSessionManager, type ProgressEvent } from "./claude-session";
 
 // 環境変数を読み込む
 config();
@@ -40,6 +46,9 @@ const DISCORD_MAX_LENGTH = 2000;
 // ボットへのプレフィックス（従来方式も維持）
 const PREFIX = "!claude";
 
+// 添付ファイルのダウンロード先ディレクトリ
+const ATTACHMENTS_DIR = join(WORK_DIR, ".discord-attachments");
+
 // セッションマネージャーの初期化
 const sessionManager = new ClaudeSessionManager(WORK_DIR, DEFAULT_MODEL);
 
@@ -54,9 +63,12 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+// ========================================
+// ユーティリティ関数
+// ========================================
+
 /**
  * 長いテキストをDiscordの文字数制限に収まるように分割する
- * コードブロックの途中で切れないよう考慮する
  */
 function splitMessage(text: string): string[] {
   if (text.length <= DISCORD_MAX_LENGTH) {
@@ -93,38 +105,27 @@ const DISCORD_FILE_SIZE_LIMIT = 25 * 1024 * 1024;
 
 /**
  * レスポンステキストからファイルパスを抽出し、実在するファイルのみ返す
- * バッククォート内のパスや、よく使われるパターンを検出する
  */
 function extractAttachableFiles(text: string, workDir: string): string[] {
   const filePaths = new Set<string>();
 
-  // バッククォート内のファイルパスを抽出（例: `src/index.ts` や `/home/user/file.txt`）
   const backtickPattern = /`([^`\s]+\.[a-zA-Z0-9]+)`/g;
   let match;
   while ((match = backtickPattern.exec(text)) !== null) {
     filePaths.add(match[1]);
   }
 
-  // 検出したパスを検証し、実在するファイルのみ返す
   const validFiles: string[] = [];
   for (const filePath of filePaths) {
-    // 絶対パスまたは作業ディレクトリからの相対パスに解決
     const absolutePath = resolve(workDir, filePath);
-
     try {
       if (!existsSync(absolutePath)) continue;
-
       const stats = statSync(absolutePath);
-      // ディレクトリは除外
       if (!stats.isFile()) continue;
-      // サイズ上限チェック
       if (stats.size > DISCORD_FILE_SIZE_LIMIT) continue;
-      // 空ファイルは除外
       if (stats.size === 0) continue;
-
       validFiles.push(absolutePath);
     } catch {
-      // アクセスエラーなどは無視
       continue;
     }
   }
@@ -136,14 +137,188 @@ function extractAttachableFiles(text: string, workDir: string): string[] {
  * ユーザーがボットの使用を許可されているか確認する
  */
 function isUserAllowed(userId: string): boolean {
-  // 許可リストが空なら全員許可
   if (ALLOWED_USER_IDS.length === 0) return true;
   return ALLOWED_USER_IDS.includes(userId);
 }
 
 /**
- * ヘルプテキストを生成する
+ * ツール名を日本語の表示名に変換する
  */
+function toolDisplayName(toolName: string): string {
+  const names: Record<string, string> = {
+    Bash: "コマンド実行",
+    Read: "ファイル読み込み",
+    Write: "ファイル書き込み",
+    Edit: "ファイル編集",
+    Glob: "ファイル検索",
+    Grep: "テキスト検索",
+    WebFetch: "Web取得",
+    WebSearch: "Web検索",
+    Task: "サブタスク",
+    TodoWrite: "タスク管理",
+  };
+  return names[toolName] || toolName;
+}
+
+// ========================================
+// 添付ファイルのダウンロード処理
+// ========================================
+
+/**
+ * Discord添付ファイルをローカルにダウンロードする
+ * ダウンロードしたファイルのパスを返す
+ */
+async function downloadAttachment(
+  url: string,
+  filename: string
+): Promise<string> {
+  // ダウンロードディレクトリが存在しなければ作成
+  if (!existsSync(ATTACHMENTS_DIR)) {
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+  }
+
+  // ファイル名の衝突を避けるためタイムスタンプを付加
+  const timestamp = Date.now();
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const localPath = join(ATTACHMENTS_DIR, `${timestamp}_${safeName}`);
+
+  const response = await fetch(url);
+  if (!response.ok || !response.body) {
+    throw new Error(`ダウンロード失敗: ${response.statusText}`);
+  }
+
+  // Node.js ReadableStreamをファイルに書き込む
+  const fileStream = createWriteStream(localPath);
+  await pipeline(Readable.fromWeb(response.body as any), fileStream);
+
+  return localPath;
+}
+
+/**
+ * Discordメッセージの添付ファイルを処理してプロンプトに追加する
+ * 画像はパスを参照、テキストファイルは内容も含める
+ */
+async function processAttachments(
+  attachments: Collection<string, any>
+): Promise<{ promptAddition: string; downloadedPaths: string[] }> {
+  if (attachments.size === 0) {
+    return { promptAddition: "", downloadedPaths: [] };
+  }
+
+  const downloadedPaths: string[] = [];
+  const promptParts: string[] = [];
+
+  for (const [, attachment] of attachments) {
+    try {
+      const localPath = await downloadAttachment(
+        attachment.url,
+        attachment.name
+      );
+      downloadedPaths.push(localPath);
+
+      // ファイルの種類に応じてプロンプトを構築
+      const ext = attachment.name.split(".").pop()?.toLowerCase() || "";
+      const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext);
+
+      if (isImage) {
+        promptParts.push(
+          `[添付画像: ${attachment.name}] → ${localPath}`
+        );
+      } else {
+        promptParts.push(
+          `[添付ファイル: ${attachment.name}] → ${localPath}\nこのファイルの内容を読んで処理してください。`
+        );
+      }
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "不明なエラー";
+      promptParts.push(
+        `[添付ファイル: ${attachment.name}] ダウンロード失敗: ${errorMsg}`
+      );
+    }
+  }
+
+  const promptAddition =
+    promptParts.length > 0
+      ? "\n\n--- 添付ファイル ---\n" + promptParts.join("\n")
+      : "";
+
+  return { promptAddition, downloadedPaths };
+}
+
+// ========================================
+// 進捗通知ヘルパー
+// ========================================
+
+/**
+ * Discordメッセージをリアルタイム進捗で更新する
+ * レート制限を避けるため、最低2秒間隔で更新する
+ */
+function createProgressUpdater(
+  editFn: (content: string) => Promise<any>
+): (event: ProgressEvent) => void {
+  let lastUpdateTime = 0;
+  let currentStatus = "考え中...";
+  let pendingUpdate = false;
+  const UPDATE_INTERVAL_MS = 2000;
+
+  const doUpdate = async () => {
+    const now = Date.now();
+    if (now - lastUpdateTime < UPDATE_INTERVAL_MS) {
+      // 更新間隔が短すぎる場合は後で更新
+      if (!pendingUpdate) {
+        pendingUpdate = true;
+        setTimeout(async () => {
+          pendingUpdate = false;
+          lastUpdateTime = Date.now();
+          try {
+            await editFn(currentStatus);
+          } catch {
+            // 編集失敗は無視（メッセージ削除済みなど）
+          }
+        }, UPDATE_INTERVAL_MS - (now - lastUpdateTime));
+      }
+      return;
+    }
+
+    lastUpdateTime = now;
+    try {
+      await editFn(currentStatus);
+    } catch {
+      // 編集失敗は無視
+    }
+  };
+
+  return (event: ProgressEvent) => {
+    switch (event.type) {
+      case "tool_progress":
+        currentStatus = `⏳ **${toolDisplayName(event.toolName)}** 実行中... (${Math.floor(event.elapsedSeconds)}秒)`;
+        doUpdate();
+        break;
+      case "tool_summary":
+        currentStatus = `✅ ${event.summary}`;
+        doUpdate();
+        break;
+      case "task_started":
+        currentStatus = `🔄 サブタスク: ${event.description}`;
+        doUpdate();
+        break;
+      case "task_completed":
+        if (event.status === "completed") {
+          currentStatus = `✅ 完了: ${event.summary}`;
+        } else {
+          currentStatus = `❌ ${event.status}: ${event.summary}`;
+        }
+        doUpdate();
+        break;
+    }
+  };
+}
+
+// ========================================
+// ヘルプテキスト
+// ========================================
+
 function getHelpText(): string {
   return [
     "**Discord Claude Code Bot**",
@@ -155,6 +330,8 @@ function getHelpText(): string {
     "`/claude prompt:<メッセージ>` — Claude Codeにメッセージを送る",
     "`/claude-clear` — セッションをリセット",
     "`/claude-model model:<モデル>` — モデルを変更",
+    "`/claude-workspace name:<名前> directory:<パス>` — ワークスペースを登録",
+    "`/claude-workspaces` — ワークスペース一覧を表示",
     "`/claude-help` — このヘルプを表示",
     "",
     "**プレフィックス方式（従来互換）:**",
@@ -162,15 +339,71 @@ function getHelpText(): string {
     `\`${PREFIX} clear\` — セッションをリセット`,
     `\`${PREFIX} help\` — このヘルプを表示`,
     "",
-    "**例:**",
-    "`/claude prompt:このプロジェクトの構成を教えて`",
-    "`/claude prompt:auth.tsのバグを修正して`",
+    "**添付ファイル:**",
+    "メッセージに画像やファイルを添付すると、Claudeに渡されます。",
     "",
-    `チャンネルごとに会話が継続されます。`,
+    "**ワークスペース:**",
+    "カテゴリ内のチャンネルは自動的にワークスペースのディレクトリで作業します。",
+    "",
+    "**進捗通知:**",
+    "処理中はツール実行状況がリアルタイムで表示されます。",
   ].join("\n");
 }
 
+// ========================================
+// 共通の応答送信処理
+// ========================================
+
+/**
+ * ClaudeCodeの応答結果をDiscordに送信する共通関数
+ */
+async function sendResponse(
+  responseText: string,
+  costUsd: number,
+  channelId: string,
+  editFirstMessage: (content: string) => Promise<any>,
+  sendToChannel: (content: string) => Promise<any>,
+  sendFilesToChannel: (files: AttachmentBuilder[]) => Promise<any>
+): Promise<void> {
+  const workDir = sessionManager.resolveWorkDir(channelId);
+  const workspaceName = sessionManager.resolveWorkspaceName(channelId);
+  const chunks = splitMessage(responseText);
+
+  // ファイル添付の準備
+  const attachableFiles = extractAttachableFiles(responseText, workDir);
+  const attachments = attachableFiles.map(
+    (filePath) => new AttachmentBuilder(filePath, { name: basename(filePath) })
+  );
+
+  const costInfo = costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
+  const wsInfo = workspaceName ? `\n-# ワークスペース: ${workspaceName}` : "";
+  const attachInfo =
+    attachments.length > 0
+      ? `\n-# 添付: ${attachableFiles.map((f) => basename(f)).join(", ")}`
+      : "";
+  const footer = attachInfo + wsInfo + costInfo;
+
+  // 最初のチャンクで元のメッセージを編集
+  await editFirstMessage(
+    chunks[0] + (chunks.length === 1 ? footer : "")
+  );
+
+  // 残りのチャンクを追加送信
+  for (let i = 1; i < chunks.length; i++) {
+    const suffix = i === chunks.length - 1 ? footer : "";
+    await sendToChannel(chunks[i] + suffix);
+  }
+
+  // 添付ファイルがあれば送信
+  if (attachments.length > 0) {
+    await sendFilesToChannel(attachments);
+  }
+}
+
+// ========================================
 // ボット起動時の処理
+// ========================================
+
 client.once("ready", () => {
   console.log(`ボットが起動しました: ${client.user?.tag}`);
   console.log(`作業ディレクトリ: ${WORK_DIR}`);
@@ -178,19 +411,17 @@ client.once("ready", () => {
   console.log(
     `許可ユーザー: ${ALLOWED_USER_IDS.length === 0 ? "全員" : ALLOWED_USER_IDS.join(", ")}`
   );
-  console.log("スラッシュコマンド: /claude, /claude-clear, /claude-model, /claude-help");
-  console.log(`プレフィックス方式: "${PREFIX} <メッセージ>" も引き続き使えます`);
 });
 
 // ========================================
 // スラッシュコマンドの処理
 // ========================================
+
 client.on("interactionCreate", async (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const userId = interaction.user.id;
 
-  // ユーザー権限チェック
   if (!isUserAllowed(userId)) {
     await interaction.reply({
       content: "このボットを使用する権限がありません。",
@@ -201,13 +432,13 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
   const { commandName } = interaction;
 
-  // /claude-help — ヘルプ表示
+  // /claude-help
   if (commandName === "claude-help") {
     await interaction.reply({ content: getHelpText(), ephemeral: true });
     return;
   }
 
-  // /claude-clear — セッションリセット
+  // /claude-clear
   if (commandName === "claude-clear") {
     const cleared = sessionManager.clearSession(interaction.channelId);
     await interaction.reply(
@@ -218,12 +449,11 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     return;
   }
 
-  // /claude-model — モデル変更
+  // /claude-model
   if (commandName === "claude-model") {
     const model = interaction.options.getString("model", true);
     sessionManager.setModel(interaction.channelId, model);
 
-    // モデル名を表示用にマッピング
     const modelNames: Record<string, string> = {
       "claude-sonnet-4-20250514": "Sonnet (高速・バランス型)",
       "claude-opus-4-20250514": "Opus (最高性能)",
@@ -237,54 +467,142 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     return;
   }
 
+  // /claude-workspace — ワークスペース登録
+  if (commandName === "claude-workspace") {
+    const name = interaction.options.getString("name", true);
+    const directory = interaction.options.getString("directory", true);
+
+    // ディレクトリの存在チェック
+    if (!existsSync(directory)) {
+      await interaction.reply({
+        content: `ディレクトリが存在しません: \`${directory}\``,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({
+        content: "このコマンドはサーバー内でのみ使用できます。",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.deferReply();
+
+    try {
+      // 既存のカテゴリを検索、なければ作成
+      let category = guild.channels.cache.find(
+        (ch): ch is CategoryChannel =>
+          ch.type === ChannelType.GuildCategory &&
+          ch.name === `🤖 ${name}`
+      );
+
+      if (!category) {
+        category = await guild.channels.create({
+          name: `🤖 ${name}`,
+          type: ChannelType.GuildCategory,
+        });
+      }
+
+      // カテゴリ配下にデフォルトチャンネルがなければ作成
+      const existingChannels = guild.channels.cache.filter(
+        (ch) => ch.parentId === category!.id
+      );
+      if (existingChannels.size === 0) {
+        await guild.channels.create({
+          name: "general",
+          type: ChannelType.GuildText,
+          parent: category,
+        });
+      }
+
+      // ワークスペースを登録
+      sessionManager.addWorkspace({
+        name,
+        directory,
+        categoryId: category.id,
+      });
+
+      await interaction.editReply(
+        `ワークスペース **${name}** を登録しました。\n` +
+          `📁 ディレクトリ: \`${directory}\`\n` +
+          `📂 カテゴリ: ${category.name}\n\n` +
+          `このカテゴリ内のチャンネルでの操作は自動的にこのディレクトリで実行されます。`
+      );
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "不明なエラー";
+      await interaction.editReply(`ワークスペースの作成に失敗: ${errorMsg}`);
+    }
+    return;
+  }
+
+  // /claude-workspaces — ワークスペース一覧
+  if (commandName === "claude-workspaces") {
+    const workspaces = sessionManager.getWorkspaces();
+    if (workspaces.length === 0) {
+      await interaction.reply({
+        content:
+          "登録されたワークスペースはありません。\n`/claude-workspace` で登録してください。",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const list = workspaces
+      .map(
+        (ws) =>
+          `• **${ws.name}** → \`${ws.directory}\``
+      )
+      .join("\n");
+
+    await interaction.reply({
+      content: `**ワークスペース一覧:**\n${list}`,
+      ephemeral: true,
+    });
+    return;
+  }
+
   // /claude — メッセージ送信
   if (commandName === "claude") {
     const prompt = interaction.options.getString("prompt", true);
 
-    // スラッシュコマンドは3秒以内に応答が必要なので、deferReplyで猶予を確保
+    // チャンネルの親カテゴリ情報をキャッシュ
+    const channel = interaction.channel;
+    if (channel && "parentId" in channel && channel.parentId) {
+      sessionManager.setChannelCategory(
+        interaction.channelId,
+        channel.parentId
+      );
+    }
+
     await interaction.deferReply();
+
+    // 進捗更新用コールバック
+    const onProgress = createProgressUpdater((content) =>
+      interaction.editReply(content)
+    );
 
     try {
       const { result, costUsd } = await sessionManager.sendPrompt(
         interaction.channelId,
-        prompt
+        prompt,
+        onProgress
       );
 
       const responseText = result || "（応答なし）";
-      const chunks = splitMessage(responseText);
 
-      // ファイル添付の準備
-      const attachableFiles = extractAttachableFiles(responseText, WORK_DIR);
-      const attachments = attachableFiles.map(
-        (filePath) =>
-          new AttachmentBuilder(filePath, { name: basename(filePath) })
+      await sendResponse(
+        responseText,
+        costUsd,
+        interaction.channelId,
+        (content) => interaction.editReply(content),
+        (content) => (interaction.channel as TextChannel).send(content),
+        (files) => (interaction.channel as TextChannel).send({ files })
       );
-
-      const costInfo =
-        costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
-      const attachInfo =
-        attachments.length > 0
-          ? `\n-# 添付ファイル: ${attachableFiles.map((f) => basename(f)).join(", ")}`
-          : "";
-
-      // 最初のチャンクでdeferReplyに応答
-      await interaction.editReply(
-        chunks[0] + (chunks.length === 1 ? attachInfo + costInfo : "")
-      );
-
-      // 残りのチャンクを追加メッセージとして送信
-      if (interaction.channel) {
-        const channel = interaction.channel as TextChannel;
-        for (let i = 1; i < chunks.length; i++) {
-          const suffix = i === chunks.length - 1 ? attachInfo + costInfo : "";
-          await channel.send(chunks[i] + suffix);
-        }
-
-        // 添付ファイルがあれば送信
-        if (attachments.length > 0) {
-          await channel.send({ files: attachments });
-        }
-      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "不明なエラー";
@@ -295,10 +613,10 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 });
 
 // ========================================
-// プレフィックス方式の処理（従来互換）
+// プレフィックス方式の処理（従来互換 + 添付ファイル対応）
 // ========================================
+
 client.on("messageCreate", async (message: Message) => {
-  // ボット自身のメッセージは無視
   if (message.author.bot) return;
 
   const content = message.content.trim();
@@ -315,7 +633,6 @@ client.on("messageCreate", async (message: Message) => {
     return;
   }
 
-  // ユーザー権限チェック
   if (!isUserAllowed(message.author.id)) {
     await message.reply("このボットを使用する権限がありません。");
     return;
@@ -338,59 +655,53 @@ client.on("messageCreate", async (message: Message) => {
     return;
   }
 
-  // プロンプトが空の場合
-  if (!prompt) {
+  // プロンプトが空で添付もない場合
+  if (!prompt && message.attachments.size === 0) {
     await message.reply(
       `メッセージを入力してください。例: \`${PREFIX} このプロジェクトの構成を教えて\``
     );
     return;
   }
 
+  // チャンネルの親カテゴリ情報をキャッシュ
+  if ("parentId" in message.channel && message.channel.parentId) {
+    sessionManager.setChannelCategory(
+      message.channelId,
+      message.channel.parentId
+    );
+  }
+
   // 処理中の表示
   const thinkingMessage = await message.reply("考え中...");
 
+  // 進捗更新用コールバック
+  const onProgress = createProgressUpdater((content) =>
+    thinkingMessage.edit(content)
+  );
+
   try {
+    // 添付ファイルを処理してプロンプトに追加
+    const { promptAddition } = await processAttachments(message.attachments);
+    const fullPrompt = prompt + promptAddition;
+
     // Claude Codeにプロンプトを送信
     const { result, costUsd } = await sessionManager.sendPrompt(
       message.channelId,
-      prompt
+      fullPrompt,
+      onProgress
     );
 
-    // 結果をDiscordに送信（文字数制限対応）
     const responseText = result || "（応答なし）";
-    const chunks = splitMessage(responseText);
-
-    // レスポンスからファイルパスを抽出し、添付ファイルを準備
-    const attachableFiles = extractAttachableFiles(responseText, WORK_DIR);
-    const attachments = attachableFiles.map(
-      (filePath) => new AttachmentBuilder(filePath, { name: basename(filePath) })
-    );
-
-    // 最初のチャンクで「考え中...」メッセージを更新
-    const costInfo =
-      costUsd > 0 ? `\n-# コスト: $${costUsd.toFixed(4)}` : "";
-
-    // 添付ファイルの案内テキスト
-    const attachInfo =
-      attachments.length > 0
-        ? `\n-# 添付ファイル: ${attachableFiles.map((f) => basename(f)).join(", ")}`
-        : "";
-
-    await thinkingMessage.edit(
-      chunks[0] + (chunks.length === 1 ? attachInfo + costInfo : "")
-    );
-
-    // 残りのチャンクを追加メッセージとして送信
     const channel = message.channel as TextChannel;
-    for (let i = 1; i < chunks.length; i++) {
-      const suffix = i === chunks.length - 1 ? attachInfo + costInfo : "";
-      await channel.send(chunks[i] + suffix);
-    }
 
-    // 添付ファイルがあれば送信
-    if (attachments.length > 0) {
-      await channel.send({ files: attachments });
-    }
+    await sendResponse(
+      responseText,
+      costUsd,
+      message.channelId,
+      (content) => thinkingMessage.edit(content),
+      (content) => channel.send(content),
+      (files) => channel.send({ files })
+    );
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : "不明なエラー";

@@ -1,38 +1,156 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+
+/**
+ * 進捗イベントの型定義
+ * ストリーム中のツール実行状況やタスク進捗をDiscordに通知するために使う
+ */
+export type ProgressEvent = {
+  type: "tool_progress";
+  toolName: string;
+  elapsedSeconds: number;
+} | {
+  type: "tool_summary";
+  summary: string;
+} | {
+  type: "task_started";
+  description: string;
+} | {
+  type: "task_completed";
+  summary: string;
+  status: "completed" | "failed" | "stopped";
+};
+
+/**
+ * 進捗コールバック関数の型
+ */
+export type ProgressCallback = (event: ProgressEvent) => void;
+
+/**
+ * ワークスペース設定
+ * Discordカテゴリとローカルディレクトリのマッピング
+ */
+export type WorkspaceConfig = {
+  name: string;
+  directory: string;
+  categoryId: string;
+};
 
 /**
  * チャンネルごとのClaude Codeセッションを管理するクラス
  * セッションIDを保持し、会話の継続を可能にする
+ * ワークスペース単位でのルーティングもサポート
  */
 export class ClaudeSessionManager {
   // チャンネルID → セッションIDのマップ
   private sessions: Map<string, string> = new Map();
   // チャンネルID → モデル名のマップ（チャンネルごとのモデル設定）
   private channelModels: Map<string, string> = new Map();
-  private workDir: string;
+  // ワークスペース一覧（カテゴリID → ワークスペース設定）
+  private workspaces: Map<string, WorkspaceConfig> = new Map();
+  // チャンネルID → カテゴリID のキャッシュ（ルーティング高速化）
+  private channelCategoryCache: Map<string, string | null> = new Map();
+  private defaultWorkDir: string;
   private defaultModel: string;
 
   constructor(workDir: string, defaultModel: string) {
-    this.workDir = workDir;
+    this.defaultWorkDir = workDir;
     this.defaultModel = defaultModel;
   }
+
+  // ========================================
+  // ワークスペース管理
+  // ========================================
+
+  /**
+   * ワークスペースを登録する
+   */
+  addWorkspace(config: WorkspaceConfig): void {
+    this.workspaces.set(config.categoryId, config);
+  }
+
+  /**
+   * ワークスペースを削除する
+   */
+  removeWorkspace(categoryId: string): boolean {
+    return this.workspaces.delete(categoryId);
+  }
+
+  /**
+   * 全ワークスペースを取得する
+   */
+  getWorkspaces(): WorkspaceConfig[] {
+    return Array.from(this.workspaces.values());
+  }
+
+  /**
+   * カテゴリIDからワークスペースを取得する
+   */
+  getWorkspaceByCategoryId(categoryId: string): WorkspaceConfig | undefined {
+    return this.workspaces.get(categoryId);
+  }
+
+  /**
+   * チャンネルの親カテゴリIDを設定する（Discordから取得した情報をキャッシュ）
+   */
+  setChannelCategory(channelId: string, categoryId: string | null): void {
+    this.channelCategoryCache.set(channelId, categoryId);
+  }
+
+  /**
+   * チャンネルに対応する作業ディレクトリを解決する
+   * 1. チャンネルの親カテゴリにワークスペースが紐付いていればそのディレクトリ
+   * 2. なければデフォルトの作業ディレクトリ
+   */
+  resolveWorkDir(channelId: string): string {
+    const categoryId = this.channelCategoryCache.get(channelId);
+    if (categoryId) {
+      const workspace = this.workspaces.get(categoryId);
+      if (workspace) {
+        return workspace.directory;
+      }
+    }
+    return this.defaultWorkDir;
+  }
+
+  /**
+   * チャンネルに対応するワークスペース名を取得する（表示用）
+   */
+  resolveWorkspaceName(channelId: string): string | null {
+    const categoryId = this.channelCategoryCache.get(channelId);
+    if (categoryId) {
+      const workspace = this.workspaces.get(categoryId);
+      if (workspace) {
+        return workspace.name;
+      }
+    }
+    return null;
+  }
+
+  // ========================================
+  // セッション管理
+  // ========================================
 
   /**
    * Claude Codeにプロンプトを送信し、結果を返す
    * 同一チャンネルでは会話を継続する
+   * onProgress コールバックでリアルタイム進捗を通知する
    */
   async sendPrompt(
     channelId: string,
-    prompt: string
+    prompt: string,
+    onProgress?: ProgressCallback
   ): Promise<{ result: string; costUsd: number }> {
     const sessionId = this.sessions.get(channelId);
 
     // チャンネルごとのモデル設定を取得（未設定ならデフォルト）
     const model = this.channelModels.get(channelId) || this.defaultModel;
 
+    // チャンネルに対応する作業ディレクトリを解決
+    const workDir = this.resolveWorkDir(channelId);
+
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
-      cwd: this.workDir,
+      cwd: workDir,
       model,
       maxTurns: 10,
       // Claude Codeのシステムプロンプトとツールを使用
@@ -61,6 +179,9 @@ export class ClaudeSessionManager {
 
     // Agent SDKのストリームを処理
     for await (const message of query({ prompt, options })) {
+      // 進捗イベントをコールバックに通知
+      this.handleProgressEvent(message, onProgress);
+
       if (message.type === "system" && message.subtype === "init") {
         // セッションIDを保存
         newSessionId = message.session_id;
@@ -88,6 +209,56 @@ export class ClaudeSessionManager {
     }
 
     return { result: resultText, costUsd };
+  }
+
+  /**
+   * ストリームイベントから進捗情報を抽出してコールバックに通知する
+   */
+  private handleProgressEvent(
+    message: SDKMessage,
+    onProgress?: ProgressCallback
+  ): void {
+    if (!onProgress) return;
+
+    // ツール実行中の進捗（例: Bashコマンド実行中, ファイル読み込み中）
+    if (message.type === "tool_progress") {
+      onProgress({
+        type: "tool_progress",
+        toolName: message.tool_name,
+        elapsedSeconds: message.elapsed_time_seconds,
+      });
+    }
+
+    // ツール実行後のサマリー（例: 「ファイルを3つ読みました」）
+    if (message.type === "tool_use_summary") {
+      onProgress({
+        type: "tool_summary",
+        summary: message.summary,
+      });
+    }
+
+    // サブタスク開始
+    if (
+      message.type === "system" &&
+      message.subtype === "task_started"
+    ) {
+      onProgress({
+        type: "task_started",
+        description: message.description,
+      });
+    }
+
+    // サブタスク完了
+    if (
+      message.type === "system" &&
+      message.subtype === "task_notification"
+    ) {
+      onProgress({
+        type: "task_completed",
+        summary: message.summary,
+        status: message.status,
+      });
+    }
   }
 
   /**
