@@ -367,6 +367,12 @@ function logUserMessage(
  */
 function logProgress(event: ProgressEvent): void {
   switch (event.type) {
+    case "assistant_text": {
+      // Claudeの考え・返答テキストをコンソールに表示
+      const preview = event.text.slice(0, 300).replace(/\n/g, " ");
+      log("🤔 Claude", C.blue, `${preview}${event.text.length > 300 ? "..." : ""}`);
+      break;
+    }
     case "tool_progress":
       log("🔧 ツール実行", C.yellow,
         `${toolDisplayName(event.toolName)} (${Math.floor(event.elapsedSeconds)}秒経過)`
@@ -378,12 +384,13 @@ function logProgress(event: ProgressEvent): void {
     case "task_started":
       log("🔄 サブタスク", C.blue, event.description);
       break;
-    case "task_completed":
+    case "task_completed": {
       const icon = event.status === "completed" ? "✅" : "❌";
       log(`${icon} タスク完了`, event.status === "completed" ? C.green : C.red,
         `[${event.status}] ${event.summary}`
       );
       break;
+    }
   }
 }
 

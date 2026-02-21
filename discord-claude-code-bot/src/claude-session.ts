@@ -18,6 +18,10 @@ export type ProgressEvent = {
   type: "task_completed";
   summary: string;
   status: "completed" | "failed" | "stopped";
+} | {
+  // Claudeのテキスト出力（考え中の内容）
+  type: "assistant_text";
+  text: string;
 };
 
 /**
@@ -237,6 +241,17 @@ export class ClaudeSessionManager {
     onProgress?: ProgressCallback
   ): void {
     if (!onProgress) return;
+
+    // Claudeのテキスト出力（返答を考えている内容）
+    if (message.type === "assistant") {
+      const textContent = message.message?.content
+        ?.filter((c: any) => c.type === "text")
+        ?.map((c: any) => c.text)
+        ?.join("") || "";
+      if (textContent) {
+        onProgress({ type: "assistant_text", text: textContent });
+      }
+    }
 
     // ツール実行中の進捗（例: Bashコマンド実行中, ファイル読み込み中）
     if (message.type === "tool_progress") {
