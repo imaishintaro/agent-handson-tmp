@@ -367,7 +367,8 @@ export class ClaudeSessionManager {
     const sessionId = this.sessions.get(channelId);
 
     // チャンネルごとのモデル設定を取得（未設定ならデフォルト）
-    const model = this.channelModels.get(channelId) || this.defaultModel;
+    // OpenRouter形式（anthropic/claude-xxx）のプレフィックスはClaude CLIが解釈できないため除去
+    const model = (this.channelModels.get(channelId) || this.defaultModel).replace(/^[^/]+\//, "");
 
     // チャンネルに対応する作業ディレクトリを解決
     const workDir = this.resolveWorkDir(channelId);
