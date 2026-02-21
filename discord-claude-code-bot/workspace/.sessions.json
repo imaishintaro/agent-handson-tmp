@@ -1,8 +1,17 @@
 {
   "sessions": {
-    "1464861924649865277": "d68bee4d-acd2-482f-89c6-28402e30fe07"
+    "1464861924649865277": "f32e2b1b-579b-4053-9e9b-e8d5c8fa287b"
   },
   "channelModels": {},
   "workspaces": {},
-  "channelCategoryCache": {}
+  "channelCategoryCache": {},
+  "conversationHistory": {
+    "1464861924649865277": [
+      {
+        "timestamp": "2026-02-21T06:31:46.816Z",
+        "userPrompt": "明日大阪マラソンだけど　観戦したい",
+        "assistantResponse": "おっ、大阪マラソン！🐾 明日なんだ\n\n観戦の準備で何か調べることある？コースのおすすめスポットとか、時間帯とか、アクセス情報とか。何でも手伝うよ〜"
+      }
+    ]
+  }
 }
