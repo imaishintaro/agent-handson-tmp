@@ -152,7 +152,7 @@ export class ClaudeSessionManager {
     const options: Parameters<typeof query>[0]["options"] = {
       cwd: workDir,
       model,
-      maxTurns: 10,
+      maxTurns: 50,
       // Claude Codeのシステムプロンプトとツールを使用
       systemPrompt: {
         type: "preset" as const,
@@ -188,18 +188,24 @@ export class ClaudeSessionManager {
       }
 
       if (message.type === "result") {
+        costUsd = message.total_cost_usd;
+        newSessionId = message.session_id;
+
         if (message.subtype === "success") {
           resultText = message.result;
-          costUsd = message.total_cost_usd;
+        } else if (message.subtype === "error_max_turns") {
+          // ターン上限に達した場合、途中の回答があれば表示する
+          const partial = "result" in message && message.result ? message.result : "";
+          resultText = partial
+            ? `${partial}\n\n⚠️ ターン上限に達しました。続きは改めて質問してください。`
+            : "⚠️ 処理が長くなりすぎました。より具体的な質問に分割してお試しください。";
         } else {
-          // エラー時
+          // その他のエラー
           resultText = `エラーが発生しました: ${message.subtype}`;
           if ("errors" in message && message.errors.length > 0) {
             resultText += `\n${message.errors.join("\n")}`;
           }
-          costUsd = message.total_cost_usd;
         }
-        newSessionId = message.session_id;
       }
     }
 
