@@ -639,10 +639,15 @@ client.on("messageCreate", async (message: Message) => {
   const content = message.content.trim();
 
   // メンション or プレフィックスで始まるメッセージのみ処理
+  // DMの場合はプレフィックス不要でそのままプロンプトとして扱う
   const mentionPrefix = `<@${client.user?.id}>`;
+  const isDM = !message.guild; // ギルドがなければDM
   let prompt = "";
 
-  if (content.startsWith(PREFIX)) {
+  if (isDM) {
+    // DMは全文をプロンプトとして使う（clearとhelpは引き続き有効）
+    prompt = content;
+  } else if (content.startsWith(PREFIX)) {
     prompt = content.slice(PREFIX.length).trim();
   } else if (content.startsWith(mentionPrefix)) {
     prompt = content.slice(mentionPrefix.length).trim();
