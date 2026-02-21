@@ -28,13 +28,18 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error("エラー: ANTHROPIC_API_KEY が設定されていません");
+if (!process.env.OPENROUTER_API_KEY) {
+  console.error("エラー: OPENROUTER_API_KEY が設定されていません");
   process.exit(1);
 }
 
+// OpenRouterを使用するためにAnthropicSDKの向き先を書き換える
+// claude-agent-sdk内部のAnthropicクライアントがこれらの環境変数を参照する
+process.env.ANTHROPIC_API_KEY = process.env.OPENROUTER_API_KEY;
+process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api/v1";
+
 // 設定値
-const DEFAULT_MODEL = process.env.MODEL || "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = process.env.MODEL || "anthropic/claude-sonnet-4-20250514";
 const WORK_DIR = process.env.WORK_DIR || process.cwd();
 const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
   ? process.env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
@@ -455,9 +460,9 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     sessionManager.setModel(interaction.channelId, model);
 
     const modelNames: Record<string, string> = {
-      "claude-sonnet-4-20250514": "Sonnet (高速・バランス型)",
-      "claude-opus-4-20250514": "Opus (最高性能)",
-      "claude-haiku-4-5-20251001": "Haiku (最速・軽量)",
+      "anthropic/claude-sonnet-4-20250514": "Sonnet (高速・バランス型)",
+      "anthropic/claude-opus-4-20250514": "Opus (最高性能)",
+      "anthropic/claude-haiku-4-5-20251001": "Haiku (最速・軽量)",
     };
     const displayName = modelNames[model] || model;
 
