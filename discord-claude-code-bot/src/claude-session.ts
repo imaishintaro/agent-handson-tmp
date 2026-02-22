@@ -219,28 +219,25 @@ export class ClaudeSessionManager {
       console.warn("[メモリ] AI要約: 失敗（生データで保存）");
     }
 
-    const lines = [
-      `# 会話メモリ ${now.toLocaleString("ja-JP")}`,
-      "",
-      ...(summary ? [
-        "## AI要約",
-        "",
-        summary,
-        "",
-        "---",
-        "",
-      ] : []),
-      "## 会話履歴",
-      "",
-      ...history.flatMap((turn) => [
-        `### ${turn.timestamp.toLocaleString("ja-JP")}`,
-        "",
-        `**ユーザー**: ${turn.userPrompt}`,
-        "",
-        `**アシスタント**: ${turn.assistantResponse}`,
-        "",
-      ]),
-    ];
+    // 要約成功時は要約のみ保存。失敗時のみ生の会話履歴をフォールバックとして保存。
+    const lines = summary
+      ? [
+          `# 会話メモリ ${now.toLocaleString("ja-JP")}`,
+          "",
+          summary,
+        ]
+      : [
+          `# 会話メモリ ${now.toLocaleString("ja-JP")}`,
+          "",
+          ...history.flatMap((turn) => [
+            `### ${turn.timestamp.toLocaleString("ja-JP")}`,
+            "",
+            `**ユーザー**: ${turn.userPrompt}`,
+            "",
+            `**アシスタント**: ${turn.assistantResponse}`,
+            "",
+          ]),
+        ];
 
     writeFileSync(filePath, lines.join("\n"), "utf-8");
     console.log(`[メモリ] 保存: ${filename} (${history.length}ターン, AI要約: ${summary ? "あり" : "なし"})`);
