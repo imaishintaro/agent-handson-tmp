@@ -34,19 +34,15 @@ if (!DISCORD_TOKEN) {
 // （このボット自体をClaude Codeセッション内で起動した場合に必要）
 delete process.env.CLAUDECODE;
 
-// APIキーは任意（Claude Code Pro/MaxプランはCLIのログイン認証を使うため不要）
-// OpenRouter経由で使う場合のみ設定する
+// APIキー設定の確認ログ
+// OPENROUTER_API_KEY: OpenRouter経由でどのモデルでも使用可能
+// ANTHROPIC_API_KEY: Anthropic直接（Pro/Maxプランのみ）
 if (process.env.OPENROUTER_API_KEY) {
-  // OpenRouter の Anthropic 互換エンドポイント
-  // ANTHROPIC_AUTH_TOKEN にキーをセットし、ANTHROPIC_API_KEY は空にする
-  process.env.ANTHROPIC_AUTH_TOKEN = process.env.OPENROUTER_API_KEY;
-  process.env.ANTHROPIC_API_KEY = "";
-  process.env.ANTHROPIC_BASE_URL = "https://openrouter.ai/api";
-  // テレメトリ無効化（OpenRouter 経由ではAnthropicへの非API通信を止める）
-  process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
-  console.log("OpenRouter APIを使用します");
+  console.log("OpenRouter APIを使用します（Vercel AI SDK経由）");
+} else if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
+  console.log("Anthropic APIを直接使用します（Vercel AI SDK経由）");
 } else {
-  console.log("Claude Code CLIのログイン認証を使用します（Pro/Maxプラン）");
+  console.warn("警告: OPENROUTER_API_KEY または ANTHROPIC_API_KEY が設定されていません");
 }
 
 // 設定値

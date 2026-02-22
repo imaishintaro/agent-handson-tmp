@@ -1,7 +1,22 @@
-import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { generateText, tool, zodSchema, stepCountIs, type ModelMessage } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { z } from "zod";
+import { exec as execCb } from "child_process";
+import { promisify } from "util";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, watch, writeFileSync, type FSWatcher } from "fs";
-import { join } from "path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  watch,
+  writeFileSync,
+  type FSWatcher,
+} from "fs";
+import { dirname, join, resolve } from "path";
+
+const exec = promisify(execCb);
 
 // ボット本体のルートディレクトリ（identify.md / context.md の置き場所）
 // dist/ の一つ上がプロジェクトルート
@@ -59,7 +74,6 @@ export type WorkspaceConfig = {
 
 /** 永続化するセッションデータの型 */
 type PersistedData = {
-  sessions: Record<string, string>;
   channelModels: Record<string, string>;
   workspaces: Record<string, WorkspaceConfig>;
   channelCategoryCache: Record<string, string | null>;
@@ -73,7 +87,7 @@ type PersistedData = {
 
 /**
  * チャンネルごとのClaude Codeセッションを管理するクラス
- * セッションIDを保持し、会話の継続を可能にする
+ * チャット履歴を保持し、会話の継続を可能にする
  * ワークスペース単位でのルーティングもサポート
  */
 /** 会話の1ターン */
@@ -84,8 +98,8 @@ type ConversationTurn = {
 };
 
 export class ClaudeSessionManager {
-  // チャンネルID → セッションIDのマップ
-  private sessions: Map<string, string> = new Map();
+  // チャンネルID → チャット履歴のマップ（Vercel AI SDK用 ModelMessage[]）
+  private chatHistory: Map<string, ModelMessage[]> = new Map();
   // チャンネルID → モデル名のマップ（チャンネルごとのモデル設定）
   private channelModels: Map<string, string> = new Map();
   // ワークスペース一覧（カテゴリID → ワークスペース設定）
@@ -117,9 +131,6 @@ export class ClaudeSessionManager {
     return join(this.defaultWorkDir, "memory");
   }
 
-  /**
-   * 会話履歴をタイムスタンプ付きMarkdownファイルに保存する
-   */
   /**
    * AIを使って会話テキストを要約する。
    * OpenRouter利用時はOpenRouter API、それ以外はAnthropic Messages APIを使用。
@@ -493,13 +504,13 @@ export class ClaudeSessionManager {
 
   /**
    * セッションデータをファイルから読み込む
+   * chatHistory はメモリのみ（再起動でリセット）
    */
   private load(): void {
     if (!existsSync(this.persistPath)) return;
     try {
       const raw = readFileSync(this.persistPath, "utf-8");
       const data: PersistedData = JSON.parse(raw);
-      this.sessions = new Map(Object.entries(data.sessions || {}));
       this.channelModels = new Map(Object.entries(data.channelModels || {}));
       this.workspaces = new Map(Object.entries(data.workspaces || {}));
       this.channelCategoryCache = new Map(Object.entries(data.channelCategoryCache || {}));
@@ -510,7 +521,7 @@ export class ClaudeSessionManager {
           turns.map((t) => ({ ...t, timestamp: new Date(t.timestamp) }))
         );
       }
-      console.log(`セッションデータを読み込みました（${this.sessions.size}件、履歴${this.conversationHistory.size}チャンネル）`);
+      console.log(`セッションデータを読み込みました（履歴${this.conversationHistory.size}チャンネル）`);
     } catch {
       console.error("セッションデータの読み込みに失敗しました（新規作成します）");
     }
@@ -518,11 +529,11 @@ export class ClaudeSessionManager {
 
   /**
    * セッションデータをファイルに保存する
+   * chatHistory はメモリのみのため保存しない
    */
   private save(): void {
     try {
       const data: PersistedData = {
-        sessions: Object.fromEntries(this.sessions),
         channelModels: Object.fromEntries(this.channelModels),
         workspaces: Object.fromEntries(this.workspaces),
         channelCategoryCache: Object.fromEntries(this.channelCategoryCache),
@@ -571,6 +582,179 @@ export class ClaudeSessionManager {
     if (parts.length > 0) return parts.join("\n\n---\n\n");
 
     return process.env.SYSTEM_PROMPT || "";
+  }
+
+  // ========================================
+  // モデル選択
+  // ========================================
+
+  /**
+   * チャンネルに対応するAIモデルを構築する。
+   * OPENROUTER_API_KEY が設定されていれば OpenRouter 経由（どのモデルでも使用可）、
+   * そうでなければ Anthropic 直接（ANTHROPIC_API_KEY が必要）。
+   */
+  private buildModel(channelId: string) {
+    const rawModel = this.channelModels.get(channelId) || this.defaultModel;
+    if (process.env.OPENROUTER_API_KEY) {
+      // OpenRouter経由: モデルIDをそのまま渡す（例: anthropic/claude-sonnet-4-20250514）
+      const openrouter = createOpenAI({
+        baseURL: "https://openrouter.ai/api/v1",
+        apiKey: process.env.OPENROUTER_API_KEY,
+      });
+      return openrouter(rawModel);
+    } else {
+      // Anthropic直接: プレフィックス（anthropic/ 等）を除去してモデルIDを渡す
+      const modelId = rawModel.replace(/^[^/]+\//, "");
+      const anthropic = createAnthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || "",
+      });
+      return anthropic(modelId);
+    }
+  }
+
+  // ========================================
+  // ツール定義（workDir 内のみアクセス可）
+  // ========================================
+
+  /**
+   * Vercel AI SDK 用のツール一覧を構築する。
+   * すべてのファイルアクセスは workDir 内に制限される。
+   */
+  private buildTools(workDir: string) {
+    // パスが workDir 内であることを確認し、絶対パスを返す
+    const checkPath = (p: string): string => {
+      const abs = resolve(workDir, p);
+      const workDirWithSep = workDir.endsWith("/") ? workDir : workDir + "/";
+      if (abs !== workDir && !abs.startsWith(workDirWithSep)) {
+        throw new Error(`アクセス拒否: ワークスペース外のパスです (${p})`);
+      }
+      return abs;
+    };
+
+    return {
+      Bash: tool({
+        description: "ワークスペースディレクトリでbashコマンドを実行する",
+        inputSchema: zodSchema(z.object({
+          command: z.string().describe("実行するbashコマンド"),
+        })),
+        execute: async (input: { command: string }) => {
+          try {
+            const result = await exec(input.command, {
+              cwd: workDir,
+              timeout: 30000,
+            });
+            const stdout = String(result.stdout || "");
+            const stderr = String(result.stderr || "");
+            return (stdout + (stderr ? `\nSTDERR: ${stderr}` : "")).slice(0, 10000) || "(出力なし)";
+          } catch (err: any) {
+            const stdout = err.stdout ? String(err.stdout) : "";
+            const stderr = err.stderr ? String(err.stderr) : "";
+            const parts = [err.message, stdout && `STDOUT: ${stdout}`, stderr && `STDERR: ${stderr}`]
+              .filter(Boolean).join("\n");
+            return parts.slice(0, 5000);
+          }
+        },
+      }),
+
+      Read: tool({
+        description: "ワークスペース内のファイルを読み込む",
+        inputSchema: zodSchema(z.object({
+          file_path: z.string().describe("読み込むファイルのパス"),
+        })),
+        execute: async (input: { file_path: string }) => {
+          try {
+            const abs = checkPath(input.file_path);
+            return readFileSync(abs, "utf-8").slice(0, 50000);
+          } catch (err: any) {
+            return `Error: ${err.message}`;
+          }
+        },
+      }),
+
+      Write: tool({
+        description: "ワークスペース内のファイルに内容を書き込む",
+        inputSchema: zodSchema(z.object({
+          file_path: z.string().describe("書き込むファイルのパス"),
+          content: z.string().describe("書き込む内容"),
+        })),
+        execute: async (input: { file_path: string; content: string }) => {
+          try {
+            const abs = checkPath(input.file_path);
+            mkdirSync(dirname(abs), { recursive: true });
+            writeFileSync(abs, input.content, "utf-8");
+            return `${input.file_path} に ${input.content.length} 文字を書き込みました`;
+          } catch (err: any) {
+            return `Error: ${err.message}`;
+          }
+        },
+      }),
+
+      Edit: tool({
+        description: "ファイル内の文字列を置換して編集する",
+        inputSchema: zodSchema(z.object({
+          file_path: z.string().describe("編集するファイルのパス"),
+          old_string: z.string().describe("置換前の文字列"),
+          new_string: z.string().describe("置換後の文字列"),
+        })),
+        execute: async (input: { file_path: string; old_string: string; new_string: string }) => {
+          try {
+            const abs = checkPath(input.file_path);
+            const content = readFileSync(abs, "utf-8");
+            if (!content.includes(input.old_string)) {
+              return `Error: 指定した文字列が ${input.file_path} 内に見つかりませんでした`;
+            }
+            writeFileSync(abs, content.replace(input.old_string, input.new_string), "utf-8");
+            return `${input.file_path} を編集しました`;
+          } catch (err: any) {
+            return `Error: ${err.message}`;
+          }
+        },
+      }),
+
+      Glob: tool({
+        description: "ワークスペース内でファイルをパターン検索する",
+        inputSchema: zodSchema(z.object({
+          pattern: z.string().describe("検索パターン（例: *.ts, src/**/*.js）"),
+          path: z.string().optional().describe("検索するディレクトリ（省略時はワークスペースルート）"),
+        })),
+        execute: async (input: { pattern: string; path?: string }) => {
+          try {
+            const searchDir = input.path ? checkPath(input.path) : workDir;
+            // glob パターンのファイル名部分を抽出して find コマンドに渡す
+            const namePattern = input.pattern.replace(/.*\//, "") || input.pattern;
+            const result = await exec(
+              `find ${JSON.stringify(searchDir)} -name ${JSON.stringify(namePattern)} -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -100`,
+              { timeout: 10000 }
+            );
+            return String(result.stdout).trim() || "ファイルが見つかりませんでした";
+          } catch (err: any) {
+            return `Error: ${err.message}`;
+          }
+        },
+      }),
+
+      Grep: tool({
+        description: "ワークスペース内でテキストを検索する",
+        inputSchema: zodSchema(z.object({
+          pattern: z.string().describe("検索パターン（正規表現可）"),
+          path: z.string().optional().describe("検索するファイルまたはディレクトリ（省略時はワークスペースルート）"),
+        })),
+        execute: async (input: { pattern: string; path?: string }) => {
+          try {
+            const target = input.path ? checkPath(input.path) : workDir;
+            const result = await exec(
+              `grep -rn ${JSON.stringify(input.pattern)} ${JSON.stringify(target)} --exclude-dir=node_modules --exclude-dir=.git 2>/dev/null | head -100`,
+              { cwd: workDir, timeout: 10000 }
+            );
+            return String(result.stdout).trim() || "マッチしませんでした";
+          } catch (err: any) {
+            // grep はマッチなしでも exit code 1 を返す
+            if (err.code === 1) return "マッチしませんでした";
+            return `Error: ${err.message}`;
+          }
+        },
+      }),
+    };
   }
 
   // ========================================
@@ -651,41 +835,25 @@ export class ClaudeSessionManager {
   // ========================================
 
   /**
-   * Claude Codeにプロンプトを送信し、結果を返す
-   * 同一チャンネルでは会話を継続する
-   * onProgress コールバックでリアルタイム進捗を通知する
+   * Vercel AI SDK を使ってプロンプトを送信し、結果を返す。
+   * チャット履歴を保持して会話を継続する。
+   * onProgress コールバックでリアルタイム進捗を通知する。
    */
   async sendPrompt(
     channelId: string,
     prompt: string,
     onProgress?: ProgressCallback
   ): Promise<{ result: string; costUsd: number }> {
-    const sessionId = this.sessions.get(channelId);
-
-    // チャンネルごとのモデル設定を取得（未設定ならデフォルト）
-    // OpenRouter使用時はプレフィックスをそのまま渡す
-    // Claude Code直接使用時はanthropicプレフィックスをCLIが認識できないため除去
-    const rawModel = this.channelModels.get(channelId) || this.defaultModel;
-    const model = process.env.OPENROUTER_API_KEY
-      ? rawModel
-      : rawModel.replace(/^[^/]+\//, "");
-
     // チャンネルに対応する作業ディレクトリを解決
     const workDir = this.resolveWorkDir(channelId);
 
-    // system.mdの内容を取得し、新規セッション開始時のみプロンプト先頭に注入する
+    // システムプロンプト構築
     const extraPrompt = this.getExtraSystemPrompt();
-    const isNewSession = !sessionId;
-
-    // ワークスペース外アクセス制限
-    const workspaceBoundary = `\n\n<workspace_restriction>\nYou MUST only access files and directories inside: ${workDir}\nNEVER access paths outside this directory using ../ or absolute paths pointing elsewhere.\n</workspace_restriction>`;
-
-    // RAG: 過去のメモリから関連情報を検索して注入（ベクトル/キーワード自動切替）
-    const ragContext = await this.searchMemories(prompt);
-
-    // このシステムの制約: 1ユーザーメッセージにつき1返信のみ送れる。
-    // 「確認するね」などの宣言だけで返信を終わらせず、
-    // 確認・調査した結果も必ず同じ返信内に含めること。
+    const workspaceBoundary =
+      `\n\n<workspace_restriction>\n` +
+      `You MUST only access files and directories inside: ${workDir}\n` +
+      `NEVER access paths outside this directory using ../ or absolute paths pointing elsewhere.\n` +
+      `</workspace_restriction>`;
     const responseConstraint =
       "<reply_constraint>\n" +
       "このDiscordボットは1メッセージにつき1回しか返信できません。\n" +
@@ -693,238 +861,130 @@ export class ClaudeSessionManager {
       "宣言だけして終わるのではなく、宣言＋結果を1つの返信にまとめること。\n" +
       "</reply_constraint>";
 
-    const systemBlock = [
+    const system = [
       "<system_instructions>",
-      ...(extraPrompt && isNewSession ? [extraPrompt] : []),
+      ...(extraPrompt ? [extraPrompt] : []),
       workspaceBoundary,
       responseConstraint,
       "</system_instructions>",
     ].join("\n");
 
-    const fullPrompt = ragContext
-      ? `${systemBlock}\n\n${ragContext}\n\n${prompt}`
-      : `${systemBlock}\n\n${prompt}`;
+    // RAG: 過去のメモリから関連情報を検索
+    const ragContext = await this.searchMemories(prompt);
+
+    // チャット履歴取得（メモリのみ、再起動でリセット）
+    const messages: ModelMessage[] = [...(this.chatHistory.get(channelId) || [])];
+
+    // ユーザーメッセージ（RAGコンテキストを先頭に付加）
+    const userContent = ragContext ? `${ragContext}\n\n${prompt}` : prompt;
+    messages.push({ role: "user", content: userContent });
 
     // コンテキストサイズをコンソールに出力
-    const promptChars = fullPrompt.length;
     const ragChars = ragContext ? ragContext.length : 0;
     console.log(
-      `[Context] プロンプト: ${promptChars.toLocaleString()}文字` +
+      `[Context] プロンプト: ${prompt.length.toLocaleString()}文字` +
       (ragChars > 0 ? ` (RAG: ${ragChars.toLocaleString()}文字含む)` : "") +
-      (sessionId ? " | セッション継続中" : " | 新規セッション")
+      (messages.length > 1 ? ` | 継続中 (${messages.length - 1}メッセージ)` : " | 新規会話")
     );
 
-    // query関数のオプション構築
-    const options: Parameters<typeof query>[0]["options"] = {
-      cwd: workDir,
-      model,
-      maxTurns: 50,
-      // 拡張思考（extended thinking）を無効化する
-      // 有効のままだとAIが回答をthinkingブロック内に格納し、
-      // 可視テキストとして出力されなくなる問題が発生するため
-      thinking: { type: "disabled" as const },
-      systemPrompt: {
-        type: "preset" as const,
-        preset: "claude_code" as const,
-      },
-      tools: {
-        type: "preset" as const,
-        preset: "claude_code" as const,
-      },
-      // プロジェクト設定を読み込む
-      settingSources: ["project" as const],
-      // Discordでは許可ダイアログを操作できないため全ツールを自動許可
-      permissionMode: "bypassPermissions" as const,
-    };
-
-    // 既存セッションがあれば継続
-    if (sessionId) {
-      options.resume = sessionId;
-    }
-
     let resultText = "";
-    let costUsd = 0;
-    let newSessionId = "";
-    // OpenRouter等でmessage.resultが空の場合のフォールバック用
-    let lastAssistantText = "";
 
-    // Agent SDKのストリームを処理
-    for await (const message of query({ prompt: fullPrompt, options })) {
-      // assistantメッセージのテキストをフォールバック用に蓄積
-      if (message.type === "assistant") {
-        const contents: any[] = (message.message as any)?.content || [];
-        for (const c of contents) {
-          if (c.type === "text" && c.text) {
-            lastAssistantText += c.text;
+    try {
+      const result = await generateText({
+        model: this.buildModel(channelId),
+        system,
+        messages,
+        tools: this.buildTools(workDir),
+        // maxSteps: 50 は AI SDK v6 では stopWhen で指定する
+        stopWhen: stepCountIs(50),
+        onStepFinish: ({ text, toolCalls, toolResults }) => {
+          if (!onProgress) return;
+
+          // アシスタントのテキスト出力
+          if (text) {
+            onProgress({ type: "assistant_text", text });
           }
-        }
-      }
 
-      // 進捗イベントをコールバックに通知
-      this.handleProgressEvent(message, onProgress);
+          // ツール呼び出し（名前と入力パラメータ）
+          if (toolCalls) {
+            for (const tc of toolCalls) {
+              onProgress({
+                type: "tool_call",
+                toolName: tc.toolName,
+                input: ((tc as any).input ?? (tc as any).args ?? {}) as Record<string, unknown>,
+              });
+            }
+          }
 
-      if (message.type === "system" && message.subtype === "init") {
-        // セッションIDを保存
-        newSessionId = message.session_id;
-      }
+          // ツール実行結果
+          if (toolResults) {
+            for (const tr of toolResults) {
+              const rawOutput = (tr as any).output;
+              const output = typeof rawOutput === "string"
+                ? rawOutput
+                : JSON.stringify(rawOutput ?? "");
+              onProgress({
+                type: "tool_result",
+                toolName: tr.toolName,
+                output: output.slice(0, 500),
+                isError: false,
+              });
+            }
+          }
+        },
+      });
 
-      // コンテキスト圧縮直前にメモリを保存する
-      if (
-        message.type === "system" &&
-        (message as any).subtype === "status" &&
-        (message as any).status === "compacting"
-      ) {
-        console.log("[Compact] コンテキスト圧縮を検出。メモリに保存します...");
+      resultText = result.text || "";
+
+      // チャット履歴を更新（ツール呼び出しを含む全メッセージ）
+      const updatedHistory = [...messages, ...result.response.messages];
+      this.chatHistory.set(channelId, updatedHistory);
+
+      // RAG用 conversationHistory を更新
+      const history = this.conversationHistory.get(channelId) || [];
+      history.push({
+        timestamp: new Date(),
+        userPrompt: prompt,
+        assistantResponse: resultText,
+      });
+      this.conversationHistory.set(channelId, history);
+
+      // コンテキスト長上限チェック（80メッセージ超でメモリ保存してトリム）
+      if (updatedHistory.length > 80) {
+        console.log(`[コンテキスト] メッセージ数が上限超過 (${updatedHistory.length})。メモリを保存してトリムします...`);
         const savedFile = await this.saveMemory(channelId);
         if (savedFile) {
-          console.log(`[Compact] 保存完了: ${savedFile}`);
+          console.log(`[コンテキスト] 保存完了: ${savedFile}`);
         }
+        // 直近20件に削減
+        this.chatHistory.set(channelId, updatedHistory.slice(-20));
+        this.conversationHistory.set(
+          channelId,
+          (this.conversationHistory.get(channelId) || []).slice(-10)
+        );
       }
 
-      if (message.type === "result") {
-        costUsd = message.total_cost_usd;
-        newSessionId = message.session_id;
+    } catch (err: any) {
+      console.error("[sendPrompt] エラー:", err);
+      resultText = `エラーが発生しました: ${err.message || String(err)}`;
 
-        // 実トークン数をコンソールに出力
-        const usage = (message as any).usage;
-        if (usage) {
-          const inputTokens: number = usage.input_tokens ?? 0;
-          const outputTokens: number = usage.output_tokens ?? 0;
-          const cacheRead: number = usage.cache_read_input_tokens ?? 0;
-          const cacheCreate: number = usage.cache_creation_input_tokens ?? 0;
-          let tokenLog = `[Token] input=${inputTokens.toLocaleString()} output=${outputTokens.toLocaleString()} total=${(inputTokens + outputTokens).toLocaleString()}`;
-          if (cacheRead > 0 || cacheCreate > 0) {
-            tokenLog += ` (cache_read=${cacheRead.toLocaleString()} cache_write=${cacheCreate.toLocaleString()})`;
-          }
-          console.log(tokenLog);
-        }
-
-        if (message.subtype === "success") {
-          // SDKのmessage.resultは現バージョンでは常に空のため、lastAssistantTextをフォールバックとして使用
-          resultText = message.result || lastAssistantText;
-          // 会話履歴に記録（RAG用）
-          const history = this.conversationHistory.get(channelId) || [];
-          history.push({
-            timestamp: new Date(),
-            userPrompt: prompt,
-            assistantResponse: resultText,
-          });
-          this.conversationHistory.set(channelId, history);
-        } else if (message.subtype === "error_max_turns") {
-          // ターン上限に達した場合、途中の回答があれば表示する
-          const partial = "result" in message && message.result ? message.result : "";
-          resultText = partial
-            ? `${partial}\n\n⚠️ ターン上限に達しました。続きは改めて質問してください。`
-            : "⚠️ 処理が長くなりすぎました。より具体的な質問に分割してお試しください。";
-        } else if (message.subtype === "error_context_window_exceeded") {
-          // コンテキスト上限に達した場合は会話履歴を保存してセッションをリセット
-          const savedFile = await this.saveMemory(channelId);
-          this.sessions.delete(channelId);
-          this.conversationHistory.delete(channelId);
-          this.save();
-          const memoryNote = savedFile
-            ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。`
-            : "";
-          resultText = `⚠️ 会話が長くなりすぎてコンテキスト上限に達しました。\nセッションをリセットしました。もう一度質問してください。${memoryNote}`;
-        } else {
-          // その他のエラー
-          resultText = `エラーが発生しました: ${message.subtype}`;
-          if ("errors" in message && message.errors.length > 0) {
-            resultText += `\n${message.errors.join("\n")}`;
-          }
-        }
+      // コンテキスト上限エラーの場合はセッションをリセット
+      if (err.message && (err.message.includes("context") || err.message.includes("tokens"))) {
+        const savedFile = await this.saveMemory(channelId);
+        this.chatHistory.delete(channelId);
+        this.conversationHistory.delete(channelId);
+        const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
+        resultText =
+          `⚠️ 会話が長くなりすぎてコンテキスト上限に達しました。\n` +
+          `セッションをリセットしました。もう一度質問してください。${memoryNote}`;
       }
     }
 
-    // セッションIDを更新して永続化
-    if (newSessionId) {
-      this.sessions.set(channelId, newSessionId);
-      this.save();
-    }
+    // 設定データ（モデル・ワークスペース・会話履歴）を永続化
+    this.save();
 
-    return { result: resultText, costUsd };
-  }
-
-  /**
-   * ストリームイベントから進捗情報を抽出してコールバックに通知する
-   */
-  private handleProgressEvent(
-    message: SDKMessage,
-    onProgress?: ProgressCallback
-  ): void {
-    if (!onProgress) return;
-
-    // Claudeのテキスト出力とツール呼び出しをキャプチャ
-    if (message.type === "assistant") {
-      const contents: any[] = message.message?.content || [];
-      for (const c of contents) {
-        if (c.type === "text" && c.text) {
-          onProgress({ type: "assistant_text", text: c.text });
-        }
-        if (c.type === "tool_use") {
-          onProgress({
-            type: "tool_call",
-            toolName: c.name,
-            input: c.input || {},
-          });
-        }
-      }
-    }
-
-    // ツール実行結果をキャプチャ
-    if (message.type === "tool_result") {
-      const contents: any[] = message.content || [];
-      const output = contents
-        .filter((c: any) => c.type === "text")
-        .map((c: any) => c.text)
-        .join("\n");
-      onProgress({
-        type: "tool_result",
-        toolName: message.tool_use_id || "",
-        output: output.slice(0, 500),
-        isError: message.is_error || false,
-      });
-    }
-
-    // ツール実行中の進捗（例: Bashコマンド実行中, ファイル読み込み中）
-    if (message.type === "tool_progress") {
-      onProgress({
-        type: "tool_progress",
-        toolName: message.tool_name,
-        elapsedSeconds: message.elapsed_time_seconds,
-      });
-    }
-
-    // ツール実行後のサマリー（例: 「ファイルを3つ読みました」）
-    if (message.type === "tool_use_summary") {
-      onProgress({
-        type: "tool_summary",
-        summary: message.summary,
-      });
-    }
-
-    // サブタスク開始
-    if (
-      message.type === "system" &&
-      message.subtype === "task_started"
-    ) {
-      onProgress({
-        type: "task_started",
-        description: message.description,
-      });
-    }
-
-    // サブタスク完了
-    if (
-      message.type === "system" &&
-      message.subtype === "task_notification"
-    ) {
-      onProgress({
-        type: "task_completed",
-        summary: message.summary,
-        status: message.status,
-      });
-    }
+    // costUsd は Vercel AI SDK では計算されないため 0 を返す
+    return { result: resultText, costUsd: 0 };
   }
 
   /**
@@ -933,7 +993,8 @@ export class ClaudeSessionManager {
    */
   async clearSession(channelId: string): Promise<{ cleared: boolean; savedFile: string | null }> {
     const savedFile = await this.saveMemory(channelId);
-    const cleared = this.sessions.delete(channelId);
+    const cleared = (this.chatHistory.get(channelId)?.length ?? 0) > 0;
+    this.chatHistory.delete(channelId);
     this.conversationHistory.delete(channelId);
     this.save();
     return { cleared, savedFile };
@@ -941,7 +1002,7 @@ export class ClaudeSessionManager {
 
   /**
    * チャンネルのモデルを変更する
-   * セッションはそのまま継続（コンテキストを維持しつつモデルだけ切り替え）
+   * チャット履歴はそのまま継続（コンテキストを維持しつつモデルだけ切り替え）
    */
   setModel(channelId: string, model: string): void {
     this.channelModels.set(channelId, model);
@@ -959,7 +1020,7 @@ export class ClaudeSessionManager {
    * 全セッションをクリアする
    */
   clearAllSessions(): void {
-    this.sessions.clear();
+    this.chatHistory.clear();
     this.channelModels.clear();
   }
 
@@ -967,6 +1028,6 @@ export class ClaudeSessionManager {
    * チャンネルにアクティブなセッションがあるか確認
    */
   hasSession(channelId: string): boolean {
-    return this.sessions.has(channelId);
+    return (this.chatHistory.get(channelId)?.length ?? 0) > 0;
   }
 }

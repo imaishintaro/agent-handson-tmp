@@ -10,11 +10,14 @@
     "deploy-commands": "tsc && node dist/deploy-commands.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.45",
+    "@ai-sdk/anthropic": "^3.0.46",
+    "@ai-sdk/openai": "^3.0.30",
+    "ai": "^6.0.97",
     "discord.js": "^14.18.0",
     "dotenv": "^16.4.7",
     "js-yaml": "^4.1.1",
-    "node-schedule": "^2.1.1"
+    "node-schedule": "^2.1.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
