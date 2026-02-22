@@ -19,8 +19,8 @@ const EMBED_COLOR = {
 // ========================================
 
 interface BaseCronJob {
-  id: string;
-  description: string;
+  id?: string;          // 省略時は自動生成
+  description?: string; // 省略時はcron式/datetimeから自動生成
   channel_id: string;
   prompt: string;
   enabled: boolean;
@@ -80,6 +80,29 @@ export function describeSchedule(job: CronJob): string {
 /** 現在時刻を "YYYY-MM-DD HH:MM:SS" 形式で返す（Asia/Tokyo） */
 function nowJST(): string {
   return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).replace("T", " ");
+}
+
+/** id・description が必ず存在することが保証されたジョブ型 */
+type NormalizedCronJob = CronJob & { id: string; description: string };
+
+/**
+ * id・description が省略されていた場合に自動補完する。
+ * id は cron式/datetimeから生成、description は cron/datetimeをそのまま使う。
+ */
+function normalizeJob(job: CronJob, index: number): NormalizedCronJob {
+  const autoId = job.type === "repeat"
+    ? `job-${index}-${job.cron.replace(/\s+/g, "").replace(/\*/g, "x")}`
+    : `job-${index}-${job.datetime.replace(/[\s:-]/g, "")}`;
+
+  const autoDescription = job.type === "repeat"
+    ? `ジョブ (${job.cron})`
+    : `ジョブ (${job.datetime})`;
+
+  return {
+    ...job,
+    id: job.id ?? autoId,
+    description: job.description ?? autoDescription,
+  };
 }
 
 // ========================================
@@ -203,7 +226,9 @@ export class CronRunner {
       return;
     }
 
-    const jobs = config?.jobs ?? [];
+    const rawJobs = config?.jobs ?? [];
+    // id・description が省略されていた場合に自動補完
+    const jobs = rawJobs.map((job, i) => normalizeJob(job, i));
     let scheduled = 0;
 
     for (const job of jobs) {
