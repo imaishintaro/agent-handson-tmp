@@ -123,11 +123,15 @@ export class ClaudeSessionManager {
    * 失敗した場合は null を返す（呼び出し元が生データにフォールバック）。
    */
   private async summarizeWithAI(conversationText: string): Promise<string | null> {
-    const prompt =
-      `以下の会話履歴を日本語で要約してください。\n` +
-      `重要な情報・決定事項・未解決の課題を保持しつつ、以下の形式で簡潔にまとめてください。\n\n` +
-      `## 概要\n（全体の流れを1〜2文で）\n\n## 主なトピック・決定事項\n（箇条書き）\n\n## 未解決の課題\n（あれば箇条書き）\n\n` +
-      `---\n\n${conversationText}`;
+    // summary_rule.md があればその内容を要約ルールとして使用する
+    const summaryRulePath = join(BOT_ROOT, "summary_rule.md");
+    const summaryRule = existsSync(summaryRulePath)
+      ? readFileSync(summaryRulePath, "utf-8").trim()
+      : null;
+
+    const prompt = summaryRule
+      ? `以下のルールに従って、会話履歴を要約してください。\n\n${summaryRule}\n\n---\n\n以下が会話履歴です:\n\n${conversationText}`
+      : `以下の会話履歴を日本語で要約してください。\n重要な情報・決定事項・未解決の課題を保持しつつ簡潔にまとめてください。\n\n${conversationText}`;
 
     try {
       if (process.env.OPENROUTER_API_KEY) {
