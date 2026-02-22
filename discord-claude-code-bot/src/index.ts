@@ -439,31 +439,43 @@ async function processAttachments(
  */
 function createProgressUpdater(
   editFn: (options: { embeds: EmbedBuilder[] }) => Promise<any>
-): { handler: (event: ProgressEvent) => void; finish: () => void } {
+): { handler: (event: ProgressEvent) => void; finish: () => Promise<void> } {
   let done = false;
   let lastUpdateTime = 0;
-  let pendingUpdate = false;
+  let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
   const UPDATE_INTERVAL_MS = 2000;
   // 積み上げるログ行
   const logLines: string[] = ["考え中..."];
 
-  const doUpdate = async () => {
+  // すべてのeditFn呼び出しをこのチェーンで直列化する。
+  // これにより「進捗Embedの更新」と「最終応答の書き込み」の順序が保証される。
+  let editChain: Promise<void> = Promise.resolve();
+
+  const scheduleEdit = () => {
+    editChain = editChain.then(async () => {
+      if (done) return;
+      try { await editFn({ embeds: [buildProgressEmbed(logLines)] }); } catch { /* 無視 */ }
+    });
+  };
+
+  const doUpdate = () => {
     if (done) return;
     const now = Date.now();
-    if (now - lastUpdateTime < UPDATE_INTERVAL_MS) {
-      if (!pendingUpdate) {
-        pendingUpdate = true;
-        setTimeout(async () => {
-          pendingUpdate = false;
-          if (done) return; // 最終応答送信後はキャンセル
-          lastUpdateTime = Date.now();
-          try { await editFn({ embeds: [buildProgressEmbed(logLines)] }); } catch { /* 無視 */ }
-        }, UPDATE_INTERVAL_MS - (now - lastUpdateTime));
-      }
-      return;
+    const elapsed = now - lastUpdateTime;
+    if (elapsed >= UPDATE_INTERVAL_MS) {
+      // レート制限内: 即座に更新をスケジュール
+      lastUpdateTime = now;
+      if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+      scheduleEdit();
+    } else if (!pendingTimeout) {
+      // レート制限中: 残り時間後に更新
+      pendingTimeout = setTimeout(() => {
+        pendingTimeout = null;
+        if (done) return;
+        lastUpdateTime = Date.now();
+        scheduleEdit();
+      }, UPDATE_INTERVAL_MS - elapsed);
     }
-    lastUpdateTime = now;
-    try { await editFn({ embeds: [buildProgressEmbed(logLines)] }); } catch { /* 無視 */ }
   };
 
   const handler = (event: ProgressEvent) => {
@@ -513,7 +525,13 @@ function createProgressUpdater(
     }
   };
 
-  const finish = () => { done = true; };
+  // done = true にし、飛んでいるeditFnが完了するまで待ってから返す。
+  // これにより呼び出し元は await finish() 後に安全に最終応答を書き込める。
+  const finish = async () => {
+    done = true;
+    if (pendingTimeout) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+    await editChain;
+  };
 
   return { handler, finish };
 }
@@ -979,7 +997,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
         onProgressWithLog
       );
 
-      finishProgress(); // 進捗更新をここで止める（最終応答の上書き防止）
+      await finishProgress(); // 進行中のEmbed更新が完了するまで待ってから最終応答を書き込む
       const responseText = result || "（応答なし）";
       logResponse(responseText);
 
@@ -1115,7 +1133,7 @@ client.on("messageCreate", async (message: Message) => {
       onProgressWithLog
     );
 
-    finishProgress(); // 進捗更新をここで止める（最終応答の上書き防止）
+    await finishProgress(); // 進行中のEmbed更新が完了するまで待ってから最終応答を書き込む
     const responseText = result || "（応答なし）";
     logResponse(responseText);
 
