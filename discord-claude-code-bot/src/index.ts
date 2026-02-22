@@ -18,7 +18,7 @@ import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import { resolve, basename, join } from "path";
 import { ClaudeSessionManager, type ProgressEvent } from "./claude-session";
-import { CronRunner } from "./cron-runner";
+import { CronRunner, describeSchedule } from "./cron-runner";
 
 // 環境変数を読み込む
 config();
@@ -908,8 +908,11 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       .setTitle("⏰ スケジュールジョブ一覧")
       .addFields(
         jobs.map((job) => ({
-          name: `${job.enabled ? "✅" : "⏸️"} ${job.description} (${job.id})`,
-          value: `\`${job.cron}\` → <#${job.channelId}>\n${job.prompt.slice(0, 80)}${job.prompt.length > 80 ? "..." : ""}`,
+          name: `${job.enabled ? "✅" : "⏸️"} ${job.description}`,
+          value:
+            `${describeSchedule(job)}\n` +
+            `📢 <#${job.channel_id}>\n` +
+            `💬 ${job.prompt.slice(0, 60)}${job.prompt.length > 60 ? "..." : ""}`,
         }))
       );
     await interaction.reply({ embeds: [cronListEmbed], ephemeral: true });
@@ -933,7 +936,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
   if (commandName === "cron-reload") {
     cronRunner.reload();
     const jobs = cronRunner.getJobs();
-    const enabled = jobs.filter((j) => j.enabled).length;
+    const enabled = jobs.filter((j: any) => j.enabled).length;
     const reloadEmbed = new EmbedBuilder()
       .setColor(EMBED_COLOR.success)
       .setDescription(`✅ crontab.json を再読み込みしました。\n有効なジョブ: **${enabled}件** / 全${jobs.length}件`);

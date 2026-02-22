@@ -38,3 +38,9 @@
 └── 📁 shared/
     ├── utils/
     └── docs/
+
+
+
+#　記憶について
+ユーザーからの会話で記憶がないことがあれば、workspace/memory　内のmemoryフォルダを参照する
+定期的にworkspace/memoryに会話概要を記録する

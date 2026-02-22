@@ -13,11 +13,13 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.45",
     "discord.js": "^14.18.0",
     "dotenv": "^16.4.7",
-    "node-cron": "^4.2.1"
+    "js-yaml": "^4.1.1",
+    "node-schedule": "^2.1.1"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
-    "@types/node-cron": "^3.0.11",
+    "@types/node-schedule": "^2.1.8",
     "typescript": "^5.7.0"
   }
 }
