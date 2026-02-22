@@ -762,7 +762,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
   // /claude-clear
   if (commandName === "claude-clear") {
-    const { cleared, savedFile } = sessionManager.clearSession(interaction.channelId);
+    const { cleared, savedFile } = await sessionManager.clearSession(interaction.channelId);
     const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
     const clearEmbed = new EmbedBuilder()
       .setColor(cleared ? EMBED_COLOR.success : EMBED_COLOR.info)
@@ -1054,7 +1054,7 @@ client.on("messageCreate", async (message: Message) => {
 
   // セッションクリアコマンド（大文字小文字・/プレフィックス不問）
   if (/^\/?clear$/i.test(prompt)) {
-    const { cleared, savedFile } = sessionManager.clearSession(message.channelId);
+    const { cleared, savedFile } = await sessionManager.clearSession(message.channelId);
     const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
     const clearMsgEmbed = new EmbedBuilder()
       .setColor(cleared ? EMBED_COLOR.success : EMBED_COLOR.info)

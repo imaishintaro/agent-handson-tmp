@@ -117,7 +117,63 @@ export class ClaudeSessionManager {
   /**
    * 会話履歴をタイムスタンプ付きMarkdownファイルに保存する
    */
-  saveMemory(channelId: string): string | null {
+  /**
+   * AIを使って会話テキストを要約する。
+   * OpenRouter利用時はOpenRouter API、それ以外はAnthropic Messages APIを使用。
+   * 失敗した場合は null を返す（呼び出し元が生データにフォールバック）。
+   */
+  private async summarizeWithAI(conversationText: string): Promise<string | null> {
+    const prompt =
+      `以下の会話履歴を日本語で要約してください。\n` +
+      `重要な情報・決定事項・未解決の課題を保持しつつ、以下の形式で簡潔にまとめてください。\n\n` +
+      `## 概要\n（全体の流れを1〜2文で）\n\n## 主なトピック・決定事項\n（箇条書き）\n\n## 未解決の課題\n（あれば箇条書き）\n\n` +
+      `---\n\n${conversationText}`;
+
+    try {
+      if (process.env.OPENROUTER_API_KEY) {
+        // OpenRouter経由
+        const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "anthropic/claude-haiku-4-5-20251001",
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 1024,
+          }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json() as any;
+        return data.choices?.[0]?.message?.content || null;
+      } else {
+        // Anthropic Messages API（CLIセッショントークンまたはAPIキー）
+        const token = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+        if (!token) return null;
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": token,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 1024,
+            messages: [{ role: "user", content: prompt }],
+          }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json() as any;
+        return data.content?.[0]?.text || null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  async saveMemory(channelId: string): Promise<string | null> {
     const history = this.conversationHistory.get(channelId);
     if (!history || history.length === 0) return null;
 
@@ -130,11 +186,35 @@ export class ClaudeSessionManager {
     const filename = `memory_${now.getFullYear()}_${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}.md`;
     const filePath = join(this.memoryDir, filename);
 
+    // 会話テキストを構築
+    const conversationText = history.map((t) =>
+      `[${t.timestamp.toLocaleString("ja-JP")}]\nユーザー: ${t.userPrompt}\nアシスタント: ${t.assistantResponse}`
+    ).join("\n\n---\n\n");
+
+    // AI要約を生成
+    console.log(`[メモリ] AI要約を生成中... (${history.length}ターン)`);
+    const summary = await this.summarizeWithAI(conversationText);
+    if (summary) {
+      console.log("[メモリ] AI要約: 成功");
+    } else {
+      console.warn("[メモリ] AI要約: 失敗（生データで保存）");
+    }
+
     const lines = [
       `# 会話メモリ ${now.toLocaleString("ja-JP")}`,
       "",
+      ...(summary ? [
+        "## AI要約",
+        "",
+        summary,
+        "",
+        "---",
+        "",
+      ] : []),
+      "## 会話履歴",
+      "",
       ...history.flatMap((turn) => [
-        `## ${turn.timestamp.toLocaleString("ja-JP")}`,
+        `### ${turn.timestamp.toLocaleString("ja-JP")}`,
         "",
         `**ユーザー**: ${turn.userPrompt}`,
         "",
@@ -144,7 +224,7 @@ export class ClaudeSessionManager {
     ];
 
     writeFileSync(filePath, lines.join("\n"), "utf-8");
-    console.log(`[メモリ] 保存: ${filename} (${history.length}ターン)`);
+    console.log(`[メモリ] 保存: ${filename} (${history.length}ターン, AI要約: ${summary ? "あり" : "なし"})`);
     return filename;
   }
 
@@ -464,7 +544,7 @@ export class ClaudeSessionManager {
         (message as any).status === "compacting"
       ) {
         console.log("[Compact] コンテキスト圧縮を検出。メモリに保存します...");
-        const savedFile = this.saveMemory(channelId);
+        const savedFile = await this.saveMemory(channelId);
         if (savedFile) {
           console.log(`[Compact] 保存完了: ${savedFile}`);
         }
@@ -507,7 +587,7 @@ export class ClaudeSessionManager {
             : "⚠️ 処理が長くなりすぎました。より具体的な質問に分割してお試しください。";
         } else if (message.subtype === "error_context_window_exceeded") {
           // コンテキスト上限に達した場合は会話履歴を保存してセッションをリセット
-          const savedFile = this.saveMemory(channelId);
+          const savedFile = await this.saveMemory(channelId);
           this.sessions.delete(channelId);
           this.conversationHistory.delete(channelId);
           this.save();
@@ -620,8 +700,8 @@ export class ClaudeSessionManager {
    * チャンネルのセッションをクリアする
    * 会話履歴があればメモリに保存してから削除する
    */
-  clearSession(channelId: string): { cleared: boolean; savedFile: string | null } {
-    const savedFile = this.saveMemory(channelId);
+  async clearSession(channelId: string): Promise<{ cleared: boolean; savedFile: string | null }> {
+    const savedFile = await this.saveMemory(channelId);
     const cleared = this.sessions.delete(channelId);
     this.conversationHistory.delete(channelId);
     this.save();
