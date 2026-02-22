@@ -54,7 +54,7 @@ export interface RepeatCronJob extends BaseCronJob {
   schedule: RepeatSchedule;
 }
 
-/** 単発ジョブ（実行後は completed_once.json に記録されスキップされる） */
+/** 単発ジョブ（実行後は crontab.yaml から削除され backlog.yaml に移動する） */
 export interface OnceCronJob extends BaseCronJob {
   type: "once";
   schedule: OnceSchedule;
@@ -62,8 +62,19 @@ export interface OnceCronJob extends BaseCronJob {
 
 export type CronJob = RepeatCronJob | OnceCronJob;
 
+/** backlog.yaml に保存するエントリ */
+interface BacklogEntry extends OnceCronJob {
+  executed_at: string;
+  status: "completed" | "failed";
+  error?: string;
+}
+
 interface CrontabConfig {
   jobs: CronJob[];
+}
+
+interface BacklogConfig {
+  completed: BacklogEntry[];
 }
 
 // ========================================
@@ -82,7 +93,6 @@ const DAY_MAP: Record<string, string> = {
 /** 曜日文字列を cron の曜日フィールドに変換する */
 function parseDays(days: string): string {
   if (DAY_MAP[days]) return DAY_MAP[days];
-  // "月,水,金" や "月・水・金" のような区切り文字に対応
   return days
     .split(/[,、・]/)
     .map((d) => DAY_MAP[d.trim()] ?? d.trim())
@@ -94,9 +104,7 @@ function toCronExpression(s: RepeatSchedule): string {
   const [hourStr, minuteStr] = s.time.split(":");
   const hour = parseInt(hourStr, 10);
   const minute = parseInt(minuteStr ?? "0", 10);
-
   if (s.month_day !== undefined) {
-    // 毎月N日
     return `${minute} ${hour} ${s.month_day} * *`;
   }
   const days = parseDays(s.days ?? "毎日");
@@ -123,6 +131,11 @@ export function describeSchedule(job: CronJob): string {
   return `🔄 繰り返し: ${s.days ?? "毎日"} ${s.time}`;
 }
 
+/** 現在時刻を "YYYY-MM-DD HH:MM:SS" 形式で返す（Asia/Tokyo） */
+function nowJST(): string {
+  return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }).replace("T", " ");
+}
+
 // ========================================
 // CronRunner クラス
 // ========================================
@@ -130,7 +143,7 @@ export function describeSchedule(job: CronJob): string {
 export class CronRunner {
   private readonly tasks = new Map<string, schedule.Job>();
   private readonly crontabPath: string;
-  private readonly completedOncePath: string;
+  private readonly backlogPath: string;
 
   constructor(
     private readonly workDir: string,
@@ -138,7 +151,7 @@ export class CronRunner {
     private readonly client: Client
   ) {
     this.crontabPath = join(workDir, "cron", "crontab.yaml");
-    this.completedOncePath = join(workDir, "cron", "completed_once.json");
+    this.backlogPath = join(workDir, "cron", "backlog.yaml");
   }
 
   /**
@@ -172,6 +185,17 @@ export class CronRunner {
     }
   }
 
+  /** バックログ一覧を返す */
+  getBacklog(): BacklogEntry[] {
+    try {
+      const raw = readFileSync(this.backlogPath, "utf-8");
+      const config = yaml.load(raw) as BacklogConfig;
+      return config?.completed ?? [];
+    } catch {
+      return [];
+    }
+  }
+
   /** 全タスクを停止して crontab.yaml を再読み込みする */
   reload(): void {
     this.tasks.forEach((job) => job.cancel());
@@ -180,22 +204,47 @@ export class CronRunner {
     this.loadAndSchedule();
   }
 
-  /** 完了済み単発ジョブのIDセットを返す */
-  private getCompletedOnceJobs(): Set<string> {
+  /**
+   * 単発ジョブを crontab.yaml から削除し backlog.yaml に移動する。
+   * crontab.yaml のヘッダーコメント（jobs: 行より前）は保持する。
+   */
+  private archiveJob(job: OnceCronJob, status: "completed" | "failed", error?: string): void {
     try {
-      const raw = readFileSync(this.completedOncePath, "utf-8");
-      return new Set(JSON.parse(raw) as string[]);
-    } catch {
-      return new Set();
-    }
-  }
+      // ── 1. crontab.yaml からジョブを削除 ──────────────────────────
+      const raw = readFileSync(this.crontabPath, "utf-8");
 
-  /** 単発ジョブの完了をファイルに記録する（crontab.yaml は変更しない） */
-  private markOnceJobCompleted(jobId: string): void {
-    const completed = this.getCompletedOnceJobs();
-    completed.add(jobId);
-    writeFileSync(this.completedOncePath, JSON.stringify([...completed], null, 2));
-    console.log(`[Cron] 単発ジョブ完了を記録しました: ${jobId}`);
+      // jobs: 行より前のヘッダーコメントを保持する
+      const headerLines: string[] = [];
+      for (const line of raw.split("\n")) {
+        if (/^jobs\s*:/.test(line)) break;
+        headerLines.push(line);
+      }
+      const header = headerLines.join("\n").trimEnd();
+
+      const config = yaml.load(raw) as CrontabConfig;
+      config.jobs = (config.jobs ?? []).filter((j) => j.id !== job.id);
+
+      const jobsYaml = yaml.dump(config, { indent: 2, lineWidth: 120 });
+      const newContent = header ? `${header}\n\n${jobsYaml}` : jobsYaml;
+      writeFileSync(this.crontabPath, newContent, "utf-8");
+
+      // ── 2. backlog.yaml にエントリを追記 ──────────────────────────
+      let backlog: BacklogEntry[] = this.getBacklog();
+      const entry: BacklogEntry = {
+        ...job,
+        executed_at: nowJST(),
+        status,
+        ...(error ? { error } : {}),
+      };
+      backlog.push(entry);
+
+      const backlogYaml = yaml.dump({ completed: backlog }, { indent: 2, lineWidth: 120 });
+      writeFileSync(this.backlogPath, backlogYaml, "utf-8");
+
+      console.log(`[Cron] 単発ジョブをバックログに移動しました: ${job.id} [${status}]`);
+    } catch (err) {
+      console.error("[Cron] バックログへの移動に失敗:", err);
+    }
   }
 
   private loadAndSchedule(): void {
@@ -209,7 +258,6 @@ export class CronRunner {
     }
 
     const jobs = config?.jobs ?? [];
-    const completedOnce = this.getCompletedOnceJobs();
     let scheduled = 0;
 
     for (const job of jobs) {
@@ -237,21 +285,13 @@ export class CronRunner {
         console.log(`[Cron] 登録(repeat): ${job.id} | ${cronExpr} | ${job.description}`);
 
       } else if (job.type === "once") {
-        // 既に完了済みならスキップ
-        if (completedOnce.has(job.id)) {
-          console.log(`[Cron] スキップ (完了済み): ${job.id}`);
-          continue;
-        }
-
         const date = parseOnceDate(job.schedule.datetime);
         if (date <= new Date()) {
           console.warn(`[Cron] 過去の日時のためスキップ: ${job.id} | ${job.schedule.datetime}`);
           continue;
         }
 
-        const task = schedule.scheduleJob(date, () => {
-          this.runJob(job).then(() => this.markOnceJobCompleted(job.id));
-        });
+        const task = schedule.scheduleJob(date, () => this.runJob(job));
         if (!task) {
           console.warn(`[Cron] スケジュール登録失敗: ${job.id}`);
           continue;
@@ -271,6 +311,7 @@ export class CronRunner {
     const channel = this.client.channels.cache.get(job.channel_id) as TextChannel | undefined;
     if (!channel || !("send" in channel)) {
       console.error(`[Cron] チャンネルが見つかりません: channel_id=${job.channel_id} (ジョブ: ${job.id})`);
+      if (job.type === "once") this.archiveJob(job, "failed", "チャンネルが見つかりません");
       return;
     }
 
@@ -310,6 +351,10 @@ export class CronRunner {
 
       await notifyMsg.edit({ embeds: [responseEmbed] });
       console.log(`[Cron] ジョブ完了: ${job.id}`);
+
+      // 単発ジョブは完了後に crontab.yaml から削除して backlog.yaml へ
+      if (job.type === "once") this.archiveJob(job, "completed");
+
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : "不明なエラー";
       console.error(`[Cron] ジョブ失敗: ${job.id} —`, errMsg);
@@ -322,6 +367,9 @@ export class CronRunner {
         .setTimestamp();
 
       await notifyMsg.edit({ embeds: [errorEmbed] });
+
+      // 失敗した単発ジョブもバックログに移動
+      if (job.type === "once") this.archiveJob(job, "failed", errMsg);
     }
   }
 }
