@@ -270,6 +270,52 @@ function buildHelpEmbed(): EmbedBuilder {
 }
 
 // ========================================
+// OpenRouter Vision API による画像説明
+// ========================================
+
+/**
+ * OpenRouter の Vision API を直接呼び出して画像を説明させる。
+ * Claude Code SDK 経由では画像フォーマットが変換されない場合があるため、
+ * OpenRouter 使用時はこの関数で事前に画像をテキスト化する。
+ */
+async function describeImageViaOpenRouter(imageUrl: string): Promise<string> {
+  const model = process.env.MODEL || DEFAULT_MODEL;
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: imageUrl } },
+            {
+              type: "text",
+              text: "この画像の内容を詳しく説明してください。テキストが含まれる場合はそのまま引用してください。",
+            },
+          ],
+        },
+      ],
+      max_tokens: 1024,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`OpenRouter Vision API エラー (${response.status}): ${body}`);
+  }
+
+  const data = await response.json() as any;
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Vision API からの応答が空でした");
+  return content;
+}
+
+// ========================================
 // 添付ファイルのダウンロード処理
 // ========================================
 
@@ -330,16 +376,27 @@ async function processAttachments(
       const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext);
 
       if (isImage) {
-        // ローカルパスとDiscord元URLの両方を渡す。
-        // Claude（Anthropic）はReadツールでローカルパスから画像を読める。
-        // OpenRouter経由のモデルはReadで読めない場合があるため、
-        // WebFetchで元URLを取得する方法も案内する。
-        promptParts.push(
-          `[添付画像: ${attachment.name}]\n` +
-          `- ローカルパス: ${localPath}\n` +
-          `- 元のURL: ${attachment.url}\n` +
-          `画像を確認する方法: まずReadツールでローカルパスを読む。読めない場合はWebFetchで元のURLを取得してください。`
-        );
+        if (process.env.OPENROUTER_API_KEY) {
+          // OpenRouter使用時: Claude Code SDK では画像フォーマットが変換されず
+          // サードパーティモデルに画像が届かない問題がある。
+          // そのため OpenRouter Vision API を直接叩いて事前にテキスト化する。
+          try {
+            const description = await describeImageViaOpenRouter(attachment.url);
+            promptParts.push(
+              `[添付画像: ${attachment.name}]\n以下は画像の説明です:\n${description}`
+            );
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : "不明なエラー";
+            promptParts.push(
+              `[添付画像: ${attachment.name}] 画像説明の取得に失敗しました: ${errMsg}`
+            );
+          }
+        } else {
+          // Anthropic（Claude Code）使用時: Readツールで直接画像を読める
+          promptParts.push(
+            `[添付画像: ${attachment.name}] → ${localPath}`
+          );
+        }
       } else {
         promptParts.push(
           `[添付ファイル: ${attachment.name}] → ${localPath}\nこのファイルの内容を読んで処理してください。`
