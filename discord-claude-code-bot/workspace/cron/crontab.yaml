@@ -3,56 +3,58 @@
 # このファイルを保存するとボットが自動で再読み込みします
 # チャンネルIDは /cron-id コマンドで確認できます
 # ============================================================
+#
+# cron式の書き方:
+#   ┌─ 分 (0-59)
+#   │ ┌─ 時 (0-23)
+#   │ │ ┌─ 日 (1-31)
+#   │ │ │ ┌─ 月 (1-12)
+#   │ │ │ │ ┌─ 曜日 (0=日, 1=月, ..., 6=土)
+#   │ │ │ │ │
+#   * * * * *
+#
+# よく使う例:
+#   "0 9 * * *"    毎日 9:00
+#   "0 9 * * 1-5"  平日 9:00
+#   "0 18 * * 1-5" 平日 18:00
+#   "0 9 * * 1"    毎週月曜 9:00
+#   "0 0 1 * *"    毎月1日 0:00
+#   "*/30 * * * *" 30分ごと
+# ============================================================
 
 jobs:
 
   # ----------------------------------------------------------
-  # 繰り返しジョブの例（type: repeat）
+  # 繰り返しジョブ（type: repeat）
   # ----------------------------------------------------------
 
   - id: daily-report
     description: 毎日の日報
-    type: repeat          # repeat = 繰り返し実行
-    schedule:
-      time: "18:00"       # 実行時刻（HH:MM）
-      days: 平日           # 毎日 / 平日 / 週末 / 月,水,金 / 月火水木金土日
+    type: repeat
+    cron: "0 18 * * 1-5"   # 平日18:00
     channel_id: "YOUR_CHANNEL_ID_HERE"
     prompt: |
       今日の作業を振り返り、完了したことと課題をまとめてください。
-    enabled: false        # true にすると有効になります
+    enabled: false
 
   - id: weekly-plan
     description: 週次計画
     type: repeat
-    schedule:
-      time: "09:00"
-      days: 月             # 毎週月曜日
+    cron: "0 9 * * 1"      # 毎週月曜9:00
     channel_id: "YOUR_CHANNEL_ID_HERE"
     prompt: |
       今週の目標と優先タスクをリストアップしてください。
     enabled: false
 
-  - id: monthly-review
-    description: 月次レビュー
-    type: repeat
-    schedule:
-      time: "10:00"
-      month_day: 1        # 毎月1日（daysより優先）
-    channel_id: "YOUR_CHANNEL_ID_HERE"
-    prompt: |
-      先月の振り返りと今月の目標をまとめてください。
-    enabled: false
-
   # ----------------------------------------------------------
-  # 単発ジョブの例（type: once）
-  # 実行後は自動的に完了済みとして記録され、再実行されません
+  # 単発ジョブ（type: once）
+  # 実行後は自動でこのファイルから削除され backlog.yaml に移動します
   # ----------------------------------------------------------
 
   - id: project-kickoff
     description: プロジェクトXキックオフリマインダー
-    type: once            # once = 1回だけ実行
-    schedule:
-      datetime: "2026-03-01 09:00"   # YYYY-MM-DD HH:MM
+    type: once
+    datetime: "2026-03-01 09:00"   # YYYY-MM-DD HH:MM
     channel_id: "YOUR_CHANNEL_ID_HERE"
     prompt: |
       プロジェクトXのキックオフミーティングが始まります。

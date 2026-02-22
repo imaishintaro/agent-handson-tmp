@@ -18,28 +18,6 @@ const EMBED_COLOR = {
 // スケジュール定義の型
 // ========================================
 
-/** 繰り返しジョブのスケジュール設定 */
-interface RepeatSchedule {
-  /** 実行時刻: "HH:MM" 形式 */
-  time: string;
-  /**
-   * 実行曜日: "毎日" | "平日" | "週末" | "月,水,金" など
-   * month_day を指定した場合はこの設定は無視される
-   */
-  days?: string;
-  /**
-   * 毎月N日に実行 (1-31)
-   * 指定すると days より優先される
-   */
-  month_day?: number;
-}
-
-/** 単発ジョブのスケジュール設定 */
-interface OnceSchedule {
-  /** 実行日時: "YYYY-MM-DD HH:MM" 形式 */
-  datetime: string;
-}
-
 interface BaseCronJob {
   id: string;
   description: string;
@@ -48,16 +26,18 @@ interface BaseCronJob {
   enabled: boolean;
 }
 
-/** 繰り返しジョブ */
+/** 繰り返しジョブ（標準cron式で指定） */
 export interface RepeatCronJob extends BaseCronJob {
   type: "repeat";
-  schedule: RepeatSchedule;
+  /** 標準cron式: "分 時 日 月 曜" 例: "0 9 * * 1-5" */
+  cron: string;
 }
 
 /** 単発ジョブ（実行後は crontab.yaml から削除され backlog.yaml に移動する） */
 export interface OnceCronJob extends BaseCronJob {
   type: "once";
-  schedule: OnceSchedule;
+  /** 実行日時: "YYYY-MM-DD HH:MM" 形式 */
+  datetime: string;
 }
 
 export type CronJob = RepeatCronJob | OnceCronJob;
@@ -78,38 +58,8 @@ interface BacklogConfig {
 }
 
 // ========================================
-// スケジュールパーサー
+// ユーティリティ関数
 // ========================================
-
-/** 日本語曜日 → cron曜日番号の対応表 */
-const DAY_MAP: Record<string, string> = {
-  毎日: "*",
-  平日: "1-5",
-  週末: "0,6",
-  月: "1", 火: "2", 水: "3",
-  木: "4", 金: "5", 土: "6", 日: "0",
-};
-
-/** 曜日文字列を cron の曜日フィールドに変換する */
-function parseDays(days: string): string {
-  if (DAY_MAP[days]) return DAY_MAP[days];
-  return days
-    .split(/[,、・]/)
-    .map((d) => DAY_MAP[d.trim()] ?? d.trim())
-    .join(",");
-}
-
-/** 繰り返しスケジュールを cron 式に変換する */
-function toCronExpression(s: RepeatSchedule): string {
-  const [hourStr, minuteStr] = s.time.split(":");
-  const hour = parseInt(hourStr, 10);
-  const minute = parseInt(minuteStr ?? "0", 10);
-  if (s.month_day !== undefined) {
-    return `${minute} ${hour} ${s.month_day} * *`;
-  }
-  const days = parseDays(s.days ?? "毎日");
-  return `${minute} ${hour} * * ${days}`;
-}
 
 /** "YYYY-MM-DD HH:MM" を Date に変換する */
 function parseOnceDate(datetime: string): Date {
@@ -122,13 +72,9 @@ function parseOnceDate(datetime: string): Date {
 /** スケジュールを人間が読みやすい文字列に変換する */
 export function describeSchedule(job: CronJob): string {
   if (job.type === "once") {
-    return `📅 単発: ${job.schedule.datetime}`;
+    return `📅 単発: ${job.datetime}`;
   }
-  const s = job.schedule;
-  if (s.month_day !== undefined) {
-    return `🔄 繰り返し: 毎月${s.month_day}日 ${s.time}`;
-  }
-  return `🔄 繰り返し: ${s.days ?? "毎日"} ${s.time}`;
+  return `🔄 繰り返し: \`${job.cron}\``;
 }
 
 /** 現在時刻を "YYYY-MM-DD HH:MM:SS" 形式で返す（Asia/Tokyo） */
@@ -267,27 +213,19 @@ export class CronRunner {
       }
 
       if (job.type === "repeat") {
-        let cronExpr: string;
-        try {
-          cronExpr = toCronExpression(job.schedule);
-        } catch (err) {
-          console.warn(`[Cron] スケジュール変換エラー: ${job.id} —`, err);
-          continue;
-        }
-
-        const task = schedule.scheduleJob(cronExpr, () => this.runJob(job));
+        const task = schedule.scheduleJob(job.cron, () => this.runJob(job));
         if (!task) {
-          console.warn(`[Cron] スケジュール登録失敗（無効な式？）: ${job.id} | "${cronExpr}"`);
+          console.warn(`[Cron] スケジュール登録失敗（無効なcron式？）: ${job.id} | "${job.cron}"`);
           continue;
         }
         this.tasks.set(job.id, task);
         scheduled++;
-        console.log(`[Cron] 登録(repeat): ${job.id} | ${cronExpr} | ${job.description}`);
+        console.log(`[Cron] 登録(repeat): ${job.id} | "${job.cron}" | ${job.description}`);
 
       } else if (job.type === "once") {
-        const date = parseOnceDate(job.schedule.datetime);
+        const date = parseOnceDate(job.datetime);
         if (date <= new Date()) {
-          console.warn(`[Cron] 過去の日時のためスキップ: ${job.id} | ${job.schedule.datetime}`);
+          console.warn(`[Cron] 過去の日時のためスキップ: ${job.id} | ${job.datetime}`);
           continue;
         }
 
@@ -298,7 +236,7 @@ export class CronRunner {
         }
         this.tasks.set(job.id, task);
         scheduled++;
-        console.log(`[Cron] 登録(once): ${job.id} | ${job.schedule.datetime} | ${job.description}`);
+        console.log(`[Cron] 登録(once): ${job.id} | ${job.datetime} | ${job.description}`);
       }
     }
 
