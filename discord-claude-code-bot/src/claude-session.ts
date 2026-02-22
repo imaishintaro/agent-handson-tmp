@@ -482,10 +482,21 @@ export class ClaudeSessionManager {
     // RAG: 過去のメモリから関連情報を検索して注入
     const ragContext = this.searchMemories(prompt);
 
+    // このシステムの制約: 1ユーザーメッセージにつき1返信のみ送れる。
+    // 「確認するね」などの宣言だけで返信を終わらせず、
+    // 確認・調査した結果も必ず同じ返信内に含めること。
+    const responseConstraint =
+      "<reply_constraint>\n" +
+      "このDiscordボットは1メッセージにつき1回しか返信できません。\n" +
+      "「確認するね」「調べるね」などの確認後の結果も、必ず同じ返信の中に含めてください。\n" +
+      "宣言だけして終わるのではなく、宣言＋結果を1つの返信にまとめること。\n" +
+      "</reply_constraint>";
+
     const systemBlock = [
       "<system_instructions>",
       ...(extraPrompt && isNewSession ? [extraPrompt] : []),
       workspaceBoundary,
+      responseConstraint,
       "</system_instructions>",
     ].join("\n");
 
