@@ -131,7 +131,8 @@ export class ClaudeSessionManager {
 
     try {
       if (process.env.OPENROUTER_API_KEY) {
-        // OpenRouter経由
+        // OpenRouter経由（.envのMODELをそのまま使用）
+        const model = this.defaultModel;
         const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -139,18 +140,27 @@ export class ClaudeSessionManager {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "anthropic/claude-haiku-4-5-20251001",
+            model,
             messages: [{ role: "user", content: prompt }],
             max_tokens: 1024,
           }),
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+          const body = await res.text().catch(() => "(読み取れず)");
+          console.error(`[メモリ] OpenRouter要約API失敗: HTTP ${res.status} — ${body}`);
+          return null;
+        }
         const data = await res.json() as any;
         return data.choices?.[0]?.message?.content || null;
       } else {
         // Anthropic Messages API（CLIセッショントークンまたはAPIキー）
         const token = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
-        if (!token) return null;
+        if (!token) {
+          console.error("[メモリ] 要約失敗: APIキーが見つかりません");
+          return null;
+        }
+        // Anthropic直接の場合はプレフィックス（anthropic/等）を除去
+        const model = this.defaultModel.replace(/^[^/]+\//, "");
         const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: {
@@ -159,16 +169,21 @@ export class ClaudeSessionManager {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "claude-haiku-4-5-20251001",
+            model,
             max_tokens: 1024,
             messages: [{ role: "user", content: prompt }],
           }),
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+          const body = await res.text().catch(() => "(読み取れず)");
+          console.error(`[メモリ] Anthropic要約API失敗: HTTP ${res.status} — ${body}`);
+          return null;
+        }
         const data = await res.json() as any;
         return data.content?.[0]?.text || null;
       }
-    } catch {
+    } catch (err) {
+      console.error("[メモリ] 要約中に例外:", err);
       return null;
     }
   }
