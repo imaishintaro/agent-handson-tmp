@@ -457,6 +457,19 @@ export class ClaudeSessionManager {
         newSessionId = message.session_id;
       }
 
+      // コンテキスト圧縮直前にメモリを保存する
+      if (
+        message.type === "system" &&
+        (message as any).subtype === "status" &&
+        (message as any).status === "compacting"
+      ) {
+        console.log("[Compact] コンテキスト圧縮を検出。メモリに保存します...");
+        const savedFile = this.saveMemory(channelId);
+        if (savedFile) {
+          console.log(`[Compact] 保存完了: ${savedFile}`);
+        }
+      }
+
       if (message.type === "result") {
         costUsd = message.total_cost_usd;
         newSessionId = message.session_id;
