@@ -84,6 +84,11 @@ const commands = [
   new SlashCommandBuilder()
     .setName("cron-reload")
     .setDescription("crontab.json を再読み込みしてジョブを更新する"),
+
+  // /cron-id — 現在のチャンネルIDを表示する
+  new SlashCommandBuilder()
+    .setName("cron-id")
+    .setDescription("このチャンネルのIDを表示する（crontab.json の channelId に使用）"),
 ].map((command) => command.toJSON());
 
 // コマンドをDiscordに登録する
@@ -104,6 +109,7 @@ const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
     console.log("  /claude-help       — ヘルプを表示");
     console.log("  /cron-list         — スケジュールジョブ一覧");
     console.log("  /cron-reload       — crontab.json を再読み込み");
+    console.log("  /cron-id           — このチャンネルのIDを表示");
   } catch (error) {
     console.error("コマンド登録エラー:", error);
   }

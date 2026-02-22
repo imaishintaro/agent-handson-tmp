@@ -911,6 +911,19 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     return;
   }
 
+  // /cron-id — 現在のチャンネルIDを表示
+  if (commandName === "cron-id") {
+    const channelId = interaction.channelId;
+    const channelMention = interaction.channel ? `<#${channelId}>` : "このチャンネル";
+    const idEmbed = new EmbedBuilder()
+      .setColor(EMBED_COLOR.info)
+      .setTitle("📋 チャンネルID")
+      .setDescription(`${channelMention}\n\`\`\`\n${channelId}\n\`\`\``)
+      .setFooter({ text: "crontab.json の channelId にコピーしてください" });
+    await interaction.reply({ embeds: [idEmbed], ephemeral: true });
+    return;
+  }
+
   // /cron-reload — crontab.json を再読み込み
   if (commandName === "cron-reload") {
     cronRunner.reload();
