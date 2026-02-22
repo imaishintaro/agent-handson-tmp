@@ -398,6 +398,15 @@ export class ClaudeSessionManager {
       ? `${systemBlock}\n\n${ragContext}\n\n${prompt}`
       : `${systemBlock}\n\n${prompt}`;
 
+    // コンテキストサイズをコンソールに出力
+    const promptChars = fullPrompt.length;
+    const ragChars = ragContext ? ragContext.length : 0;
+    console.log(
+      `[Context] プロンプト: ${promptChars.toLocaleString()}文字` +
+      (ragChars > 0 ? ` (RAG: ${ragChars.toLocaleString()}文字含む)` : "") +
+      (sessionId ? " | セッション継続中" : " | 新規セッション")
+    );
+
     // query関数のオプション構築
     const options: Parameters<typeof query>[0]["options"] = {
       cwd: workDir,
@@ -452,8 +461,21 @@ export class ClaudeSessionManager {
         costUsd = message.total_cost_usd;
         newSessionId = message.session_id;
 
+        // 実トークン数をコンソールに出力
+        const usage = (message as any).usage;
+        if (usage) {
+          const inputTokens: number = usage.input_tokens ?? 0;
+          const outputTokens: number = usage.output_tokens ?? 0;
+          const cacheRead: number = usage.cache_read_input_tokens ?? 0;
+          const cacheCreate: number = usage.cache_creation_input_tokens ?? 0;
+          let tokenLog = `[Token] input=${inputTokens.toLocaleString()} output=${outputTokens.toLocaleString()} total=${(inputTokens + outputTokens).toLocaleString()}`;
+          if (cacheRead > 0 || cacheCreate > 0) {
+            tokenLog += ` (cache_read=${cacheRead.toLocaleString()} cache_write=${cacheCreate.toLocaleString()})`;
+          }
+          console.log(tokenLog);
+        }
+
         if (message.subtype === "success") {
-          // OpenRouter等ではmessage.resultが空になる場合があるのでフォールバック
           // SDKのmessage.resultは現バージョンでは常に空のため、lastAssistantTextをフォールバックとして使用
           resultText = message.result || lastAssistantText;
           // 会話履歴に記録（RAG用）
