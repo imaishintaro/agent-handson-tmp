@@ -56,6 +56,11 @@ const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
   ? process.env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
   : [];
 
+// メンション不要で全メッセージに反応するチャンネルIDのリスト
+const AUTO_CHANNELS = process.env.AUTO_CHANNELS
+  ? process.env.AUTO_CHANNELS.split(",").map((id) => id.trim())
+  : [];
+
 // Embedのdescription文字数上限（Discord上限は4096）
 const EMBED_MAX_LENGTH = 4000;
 
@@ -1002,13 +1007,14 @@ client.on("messageCreate", async (message: Message) => {
   const content = message.content.trim();
 
   // メンション or プレフィックスで始まるメッセージのみ処理
-  // DMの場合はプレフィックス不要でそのままプロンプトとして扱う
+  // DM または AUTO_CHANNELS に指定されたチャンネルはプレフィックス不要
   const mentionPrefix = `<@${client.user?.id}>`;
   const isDM = !message.guild; // ギルドがなければDM
+  const isAutoChannel = AUTO_CHANNELS.includes(message.channelId);
   let prompt = "";
 
-  if (isDM) {
-    // DMは全文をプロンプトとして使う（clearとhelpは引き続き有効）
+  if (isDM || isAutoChannel) {
+    // DM・指定チャンネルは全文をプロンプトとして使う
     prompt = content;
   } else if (content.startsWith(PREFIX)) {
     prompt = content.slice(PREFIX.length).trim();
@@ -1069,6 +1075,8 @@ client.on("messageCreate", async (message: Message) => {
   // ユーザーメッセージをコンソールに出力
   const channelInfo = isDM
     ? "DM"
+    : isAutoChannel && "name" in message.channel
+    ? `#${(message.channel as any).name} [auto]`
     : "name" in message.channel
     ? `#${(message.channel as any).name}`
     : message.channelId;
