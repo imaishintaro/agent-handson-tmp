@@ -1053,7 +1053,7 @@ client.on("messageCreate", async (message: Message) => {
   }
 
   // セッションクリアコマンド（大文字小文字・/プレフィックス不問）
-  if (/^\/?(clear|クリア|リセット)$/i.test(prompt)) {
+  if (/^\/?clear$/i.test(prompt)) {
     const { cleared, savedFile } = sessionManager.clearSession(message.channelId);
     const memoryNote = savedFile ? `\n💾 会話履歴を \`${savedFile}\` に保存しました。` : "";
     const clearMsgEmbed = new EmbedBuilder()
@@ -1068,7 +1068,7 @@ client.on("messageCreate", async (message: Message) => {
   }
 
   // ヘルプコマンド
-  if (/^\/?(help|ヘルプ)$/i.test(prompt)) {
+  if (/^\/?help$/i.test(prompt)) {
     await message.reply({ embeds: [buildHelpEmbed()] });
     return;
   }
