@@ -1,4 +1,5 @@
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { createHash } from "crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
@@ -244,20 +245,149 @@ export class ClaudeSessionManager {
     return filename;
   }
 
+  // ========================================
+  // ベクトル検索（RAG）
+  // ========================================
+
+  /** エンベディングキャッシュの保存先 */
+  private get embeddingsPath(): string {
+    return join(this.memoryDir, ".embeddings.json");
+  }
+
+  /** エンベディングキャッシュを読み込む */
+  private loadEmbeddingsCache(): Record<string, { hash: string; vector: number[] }> {
+    if (!existsSync(this.embeddingsPath)) return {};
+    try {
+      return JSON.parse(readFileSync(this.embeddingsPath, "utf-8"));
+    } catch {
+      return {};
+    }
+  }
+
+  /** エンベディングキャッシュを保存する */
+  private saveEmbeddingsCache(cache: Record<string, { hash: string; vector: number[] }>): void {
+    try {
+      writeFileSync(this.embeddingsPath, JSON.stringify(cache), "utf-8");
+    } catch {
+      // キャッシュ保存失敗は無視（次回再計算するだけ）
+    }
+  }
+
+  /** テキストのMD5ハッシュを計算する（キャッシュ無効化用） */
+  private hashContent(content: string): string {
+    return createHash("md5").update(content).digest("hex");
+  }
+
   /**
-   * ユーザーのクエリに関連するメモリファイルをキーワード検索して返す
+   * テキストをベクトルに変換する（OpenAI互換 Embedding API）
+   * EMBEDDING_API_KEY が未設定の場合は null を返す
    */
-  private searchMemories(query: string): string {
+  private async embedText(text: string): Promise<number[] | null> {
+    const apiKey = process.env.EMBEDDING_API_KEY;
+    if (!apiKey) return null;
+
+    const baseUrl = (process.env.EMBEDDING_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+    const model = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
+
+    try {
+      const res = await fetch(`${baseUrl}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ input: text, model }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.error(`[RAG] Embedding API失敗: HTTP ${res.status} — ${body}`);
+        return null;
+      }
+      const data = await res.json() as any;
+      return data.data?.[0]?.embedding || null;
+    } catch (err) {
+      console.error("[RAG] Embedding API例外:", err);
+      return null;
+    }
+  }
+
+  /** コサイン類似度を計算する（-1〜1、高いほど類似） */
+  private cosineSimilarity(a: number[], b: number[]): number {
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    const denom = Math.sqrt(normA) * Math.sqrt(normB);
+    return denom === 0 ? 0 : dot / denom;
+  }
+
+  /**
+   * ユーザーのクエリに関連するメモリファイルを検索して返す。
+   * EMBEDDING_API_KEY が設定されていればベクトル検索、未設定ならキーワード検索にフォールバック。
+   */
+  private async searchMemories(query: string): Promise<string> {
     if (!existsSync(this.memoryDir)) return "";
 
+    // memory_*.md のみ対象（CLAUDE.md 等は除外）
     const files = readdirSync(this.memoryDir)
-      .filter((f) => f.endsWith(".md"))
+      .filter((f) => /^memory_.*\.md$/.test(f))
       .sort()
       .reverse(); // 新しい順
 
     if (files.length === 0) return "";
 
-    // クエリを単語に分割（2文字以上）
+    // ── ベクトル検索 ─────────────────────────────────────────
+    const queryVector = await this.embedText(query.slice(0, 1000));
+
+    if (queryVector) {
+      const cache = this.loadEmbeddingsCache();
+      let cacheUpdated = false;
+
+      // 各メモリファイルのエンベディングを計算/キャッシュ更新
+      for (const file of files) {
+        const filePath = join(this.memoryDir, file);
+        const content = readFileSync(filePath, "utf-8");
+        const hash = this.hashContent(content);
+
+        if (!cache[file] || cache[file].hash !== hash) {
+          const vector = await this.embedText(content.slice(0, 4000));
+          if (vector) {
+            cache[file] = { hash, vector };
+            cacheUpdated = true;
+          }
+        }
+      }
+
+      if (cacheUpdated) this.saveEmbeddingsCache(cache);
+
+      // コサイン類似度でランキング（上位3件、閾値0.5以上）
+      const MIN_SIMILARITY = 0.5;
+      const scored = files
+        .filter((f) => cache[f]?.vector)
+        .map((file) => ({
+          file,
+          content: readFileSync(join(this.memoryDir, file), "utf-8"),
+          similarity: this.cosineSimilarity(queryVector, cache[file].vector),
+        }))
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, 3)
+        .filter((f) => f.similarity >= MIN_SIMILARITY);
+
+      if (scored.length === 0) return "";
+
+      console.log(`[RAG] ベクトル検索: ${scored.length}件 (類似度: ${scored.map((f) => f.similarity.toFixed(2)).join(", ")})`);
+
+      return [
+        "<past_memories>",
+        "以下は過去の会話から検索された関連メモリです:",
+        ...scored.map((f) => `\n### ${f.file}\n${f.content}`),
+        "</past_memories>",
+      ].join("\n");
+    }
+
+    // ── キーワード検索（フォールバック） ──────────────────────
     const keywords = query
       .toLowerCase()
       .split(/[\s、。！？,.!?\n]+/)
@@ -265,7 +395,6 @@ export class ClaudeSessionManager {
 
     if (keywords.length === 0) return "";
 
-    // 各ファイルのスコアを計算
     const scored = files.map((file) => {
       const content = readFileSync(join(this.memoryDir, file), "utf-8");
       const lower = content.toLowerCase();
@@ -273,7 +402,6 @@ export class ClaudeSessionManager {
       return { file, content, score };
     });
 
-    // スコア上位3件を取得（最低1件一致）
     const relevant = scored
       .filter((f) => f.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -281,7 +409,7 @@ export class ClaudeSessionManager {
 
     if (relevant.length === 0) return "";
 
-    console.log(`[RAG] ${relevant.length}件のメモリが一致: ${relevant.map((f) => f.file).join(", ")}`);
+    console.log(`[RAG] キーワード検索: ${relevant.length}件 (${relevant.map((f) => f.file).join(", ")})`);
 
     return [
       "<past_memories>",
@@ -480,8 +608,8 @@ export class ClaudeSessionManager {
     // ワークスペース外アクセス制限
     const workspaceBoundary = `\n\n<workspace_restriction>\nYou MUST only access files and directories inside: ${workDir}\nNEVER access paths outside this directory using ../ or absolute paths pointing elsewhere.\n</workspace_restriction>`;
 
-    // RAG: 過去のメモリから関連情報を検索して注入
-    const ragContext = this.searchMemories(prompt);
+    // RAG: 過去のメモリから関連情報を検索して注入（ベクトル/キーワード自動切替）
+    const ragContext = await this.searchMemories(prompt);
 
     // このシステムの制約: 1ユーザーメッセージにつき1返信のみ送れる。
     // 「確認するね」などの宣言だけで返信を終わらせず、
