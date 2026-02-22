@@ -1,6 +1,6 @@
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, watch, writeFileSync, type FSWatcher } from "fs";
 import { join } from "path";
 
 // ボット本体のルートディレクトリ（identify.md / context.md の置き場所）
@@ -98,6 +98,8 @@ export class ClaudeSessionManager {
   private defaultModel: string;
   // セッションデータの保存先ファイルパス
   private persistPath: string;
+  // memory/ ディレクトリの変更を監視するウォッチャー
+  private memoryWatcher: FSWatcher | null = null;
 
   constructor(workDir: string, defaultModel: string) {
     this.defaultWorkDir = workDir;
@@ -240,8 +242,13 @@ export class ClaudeSessionManager {
           ]),
         ];
 
-    writeFileSync(filePath, lines.join("\n"), "utf-8");
+    const fileContent = lines.join("\n");
+    writeFileSync(filePath, fileContent, "utf-8");
     console.log(`[メモリ] 保存: ${filename} (${history.length}ターン, AI要約: ${summary ? "あり" : "なし"})`);
+
+    // エンベディングを即時生成（非同期で実行、完了を待たない）
+    void this.updateEmbeddingForFile(filename, fileContent);
+
     return filename;
   }
 
@@ -417,6 +424,71 @@ export class ClaudeSessionManager {
       ...relevant.map((f) => `\n### ${f.file}\n${f.content}`),
       "</past_memories>",
     ].join("\n");
+  }
+
+  /**
+   * 指定したメモリファイルのエンベディングを計算してキャッシュに保存する。
+   * EMBEDDING_API_KEY が未設定の場合は何もしない。
+   * ハッシュが変わっていない場合は再計算をスキップする。
+   */
+  private async updateEmbeddingForFile(filename: string, content: string): Promise<void> {
+    if (!process.env.EMBEDDING_API_KEY) return;
+
+    const cache = this.loadEmbeddingsCache();
+    const hash = this.hashContent(content);
+
+    // ハッシュが一致していれば変更なし → スキップ
+    if (cache[filename]?.hash === hash) return;
+
+    const vector = await this.embedText(content.slice(0, 4000));
+    if (!vector) return;
+
+    cache[filename] = { hash, vector };
+    this.saveEmbeddingsCache(cache);
+    console.log(`[RAG] エンベディング更新: ${filename}`);
+  }
+
+  /**
+   * memory/ ディレクトリを監視し、memory_*.md ファイルが変更されたら
+   * エンベディングを自動更新する。
+   * EMBEDDING_API_KEY が未設定の場合は起動しない。
+   * 既に起動済みの場合は何もしない。
+   */
+  startMemoryWatcher(): void {
+    if (!process.env.EMBEDDING_API_KEY) return;
+    if (this.memoryWatcher) return;
+
+    // ディレクトリが存在しない場合は作成してから監視
+    if (!existsSync(this.memoryDir)) {
+      mkdirSync(this.memoryDir, { recursive: true });
+    }
+
+    // ファイルごとのデバウンスタイマー（連続変更イベントをまとめる）
+    const debounceMap = new Map<string, ReturnType<typeof setTimeout>>();
+
+    this.memoryWatcher = watch(this.memoryDir, (_, filename) => {
+      if (!filename || !/^memory_.*\.md$/.test(filename)) return;
+
+      // 500ms デバウンス
+      const existing = debounceMap.get(filename);
+      if (existing) clearTimeout(existing);
+
+      debounceMap.set(filename, setTimeout(async () => {
+        debounceMap.delete(filename);
+
+        const filePath = join(this.memoryDir, filename);
+        if (!existsSync(filePath)) return; // 削除された場合は無視
+
+        try {
+          const content = readFileSync(filePath, "utf-8");
+          await this.updateEmbeddingForFile(filename, content);
+        } catch (err) {
+          console.error(`[RAG] ファイル監視エラー (${filename}):`, err);
+        }
+      }, 500));
+    });
+
+    console.log(`[RAG] メモリディレクトリを監視中: ${this.memoryDir}`);
   }
 
   /**

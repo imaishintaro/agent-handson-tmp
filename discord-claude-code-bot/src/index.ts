@@ -720,6 +720,9 @@ client.once("ready", () => {
   // Cronスケジューラーを起動
   cronRunner.start();
 
+  // メモリファイルの変更を監視してエンベディングを自動更新
+  sessionManager.startMemoryWatcher();
+
   // システムプロンプトの読み込み元を表示
   const identifyMdPath = `${WORK_DIR}/identify.md`;
   const contextMdPath  = `${WORK_DIR}/context.md`;
