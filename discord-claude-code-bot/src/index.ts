@@ -330,8 +330,15 @@ async function processAttachments(
       const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext);
 
       if (isImage) {
+        // ローカルパスとDiscord元URLの両方を渡す。
+        // Claude（Anthropic）はReadツールでローカルパスから画像を読める。
+        // OpenRouter経由のモデルはReadで読めない場合があるため、
+        // WebFetchで元URLを取得する方法も案内する。
         promptParts.push(
-          `[添付画像: ${attachment.name}] → ${localPath}`
+          `[添付画像: ${attachment.name}]\n` +
+          `- ローカルパス: ${localPath}\n` +
+          `- 元のURL: ${attachment.url}\n` +
+          `画像を確認する方法: まずReadツールでローカルパスを読む。読めない場合はWebFetchで元のURLを取得してください。`
         );
       } else {
         promptParts.push(
