@@ -454,6 +454,7 @@ export class ClaudeSessionManager {
 
         if (message.subtype === "success") {
           // OpenRouter等ではmessage.resultが空になる場合があるのでフォールバック
+          // SDKのmessage.resultは現バージョンでは常に空のため、lastAssistantTextをフォールバックとして使用
           resultText = message.result || lastAssistantText;
           // 会話履歴に記録（RAG用）
           const history = this.conversationHistory.get(channelId) || [];
