@@ -492,6 +492,10 @@ export class ClaudeSessionManager {
       cwd: workDir,
       model,
       maxTurns: 50,
+      // 拡張思考（extended thinking）を無効化する
+      // 有効のままだとAIが回答をthinkingブロック内に格納し、
+      // 可視テキストとして出力されなくなる問題が発生するため
+      thinking: { type: "disabled" as const },
       systemPrompt: {
         type: "preset" as const,
         preset: "claude_code" as const,
