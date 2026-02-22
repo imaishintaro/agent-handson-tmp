@@ -36,8 +36,8 @@ export interface RepeatCronJob extends BaseCronJob {
 /** 単発ジョブ（実行後は crontab.yaml から削除され backlog.yaml に移動する） */
 export interface OnceCronJob extends BaseCronJob {
   type: "once";
-  /** 実行日時: "YYYY-MM-DD HH:MM" 形式 */
-  datetime: string;
+  /** 標準cron式: "分 時 日 月 曜" 例: "0 9 1 3 *"（3月1日 9:00に1回だけ実行） */
+  cron: string;
 }
 
 export type CronJob = RepeatCronJob | OnceCronJob;
@@ -61,18 +61,10 @@ interface BacklogConfig {
 // ユーティリティ関数
 // ========================================
 
-/** "YYYY-MM-DD HH:MM" を Date に変換する */
-function parseOnceDate(datetime: string): Date {
-  const [datePart, timePart = "0:0"] = datetime.split(" ");
-  const [year, month, day] = datePart.split("-").map(Number);
-  const [hour, minute] = timePart.split(":").map(Number);
-  return new Date(year, month - 1, day, hour, minute, 0);
-}
-
 /** スケジュールを人間が読みやすい文字列に変換する */
 export function describeSchedule(job: CronJob): string {
   if (job.type === "once") {
-    return `📅 単発: ${job.datetime}`;
+    return `📅 単発: \`${job.cron}\``;
   }
   return `🔄 繰り返し: \`${job.cron}\``;
 }
@@ -90,13 +82,11 @@ type NormalizedCronJob = CronJob & { id: string; description: string };
  * id は cron式/datetimeから生成、description は cron/datetimeをそのまま使う。
  */
 function normalizeJob(job: CronJob, index: number): NormalizedCronJob {
-  const autoId = job.type === "repeat"
-    ? `job-${index}-${job.cron.replace(/\s+/g, "").replace(/\*/g, "x")}`
-    : `job-${index}-${job.datetime.replace(/[\s:-]/g, "")}`;
-
+  const cronKey = job.cron.replace(/\s+/g, "").replace(/\*/g, "x");
+  const autoId = `job-${index}-${cronKey}`;
   const autoDescription = job.type === "repeat"
-    ? `ジョブ (${job.cron})`
-    : `ジョブ (${job.datetime})`;
+    ? `繰り返しジョブ (${job.cron})`
+    : `単発ジョブ (${job.cron})`;
 
   return {
     ...job,
@@ -237,32 +227,15 @@ export class CronRunner {
         continue;
       }
 
-      if (job.type === "repeat") {
-        const task = schedule.scheduleJob(job.cron, () => this.runJob(job));
-        if (!task) {
-          console.warn(`[Cron] スケジュール登録失敗（無効なcron式？）: ${job.id} | "${job.cron}"`);
-          continue;
-        }
-        this.tasks.set(job.id, task);
-        scheduled++;
-        console.log(`[Cron] 登録(repeat): ${job.id} | "${job.cron}" | ${job.description}`);
-
-      } else if (job.type === "once") {
-        const date = parseOnceDate(job.datetime);
-        if (date <= new Date()) {
-          console.warn(`[Cron] 過去の日時のためスキップ: ${job.id} | ${job.datetime}`);
-          continue;
-        }
-
-        const task = schedule.scheduleJob(date, () => this.runJob(job));
-        if (!task) {
-          console.warn(`[Cron] スケジュール登録失敗: ${job.id}`);
-          continue;
-        }
-        this.tasks.set(job.id, task);
-        scheduled++;
-        console.log(`[Cron] 登録(once): ${job.id} | ${job.datetime} | ${job.description}`);
+      const label = job.type === "once" ? "once" : "repeat";
+      const task = schedule.scheduleJob(job.cron, () => this.runJob(job));
+      if (!task) {
+        console.warn(`[Cron] スケジュール登録失敗（無効なcron式？）: ${job.id} | "${job.cron}"`);
+        continue;
       }
+      this.tasks.set(job.id, task);
+      scheduled++;
+      console.log(`[Cron] 登録(${label}): ${job.id} | "${job.cron}" | ${job.description}`);
     }
 
     console.log(`[Cron] ${scheduled} 件のジョブを登録しました（全${jobs.length}件中）`);
