@@ -18,6 +18,7 @@ import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import { resolve, basename, join } from "path";
 import { ClaudeSessionManager, type ProgressEvent } from "./claude-session";
+import { CronRunner } from "./cron-runner";
 
 // 環境変数を読み込む
 config();
@@ -86,6 +87,9 @@ const client = new Client({
   ],
   partials: [Partials.Channel],
 });
+
+// Cronランナーの初期化（クライアント準備後に start() を呼ぶ）
+const cronRunner = new CronRunner(WORK_DIR, sessionManager, client);
 
 // ========================================
 // ユーティリティ関数
@@ -690,6 +694,9 @@ client.once("ready", () => {
     `許可ユーザー: ${ALLOWED_USER_IDS.length === 0 ? "全員" : ALLOWED_USER_IDS.join(", ")}`
   );
 
+  // Cronスケジューラーを起動
+  cronRunner.start();
+
   // システムプロンプトの読み込み元を表示
   const identifyMdPath = `${WORK_DIR}/identify.md`;
   const contextMdPath  = `${WORK_DIR}/context.md`;
@@ -873,6 +880,46 @@ client.on("interactionCreate", async (interaction: Interaction) => {
         }))
       );
     await interaction.reply({ embeds: [wsListEmbed], ephemeral: true });
+    return;
+  }
+
+  // /cron-list — 登録済みジョブ一覧を表示
+  if (commandName === "cron-list") {
+    const jobs = cronRunner.getJobs();
+    if (jobs.length === 0) {
+      await interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(EMBED_COLOR.info)
+            .setDescription("ジョブが登録されていません。\n`workspace/cron/crontab.json` を編集してください。"),
+        ],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const cronListEmbed = new EmbedBuilder()
+      .setColor(EMBED_COLOR.info)
+      .setTitle("⏰ スケジュールジョブ一覧")
+      .addFields(
+        jobs.map((job) => ({
+          name: `${job.enabled ? "✅" : "⏸️"} ${job.description} (${job.id})`,
+          value: `\`${job.cron}\` → <#${job.channelId}>\n${job.prompt.slice(0, 80)}${job.prompt.length > 80 ? "..." : ""}`,
+        }))
+      );
+    await interaction.reply({ embeds: [cronListEmbed], ephemeral: true });
+    return;
+  }
+
+  // /cron-reload — crontab.json を再読み込み
+  if (commandName === "cron-reload") {
+    cronRunner.reload();
+    const jobs = cronRunner.getJobs();
+    const enabled = jobs.filter((j) => j.enabled).length;
+    const reloadEmbed = new EmbedBuilder()
+      .setColor(EMBED_COLOR.success)
+      .setDescription(`✅ crontab.json を再読み込みしました。\n有効なジョブ: **${enabled}件** / 全${jobs.length}件`);
+    await interaction.reply({ embeds: [reloadEmbed] });
     return;
   }
 

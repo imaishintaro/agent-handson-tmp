@@ -12,10 +12,12 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.45",
     "discord.js": "^14.18.0",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "node-cron": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
     "typescript": "^5.7.0"
   }
 }

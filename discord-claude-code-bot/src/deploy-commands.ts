@@ -74,6 +74,16 @@ const commands = [
   new SlashCommandBuilder()
     .setName("claude-help")
     .setDescription("Claude Code Botの使い方を表示する"),
+
+  // /cron-list — スケジュールジョブ一覧を表示する
+  new SlashCommandBuilder()
+    .setName("cron-list")
+    .setDescription("登録済みスケジュールジョブの一覧を表示する"),
+
+  // /cron-reload — crontab.json を再読み込みする
+  new SlashCommandBuilder()
+    .setName("cron-reload")
+    .setDescription("crontab.json を再読み込みしてジョブを更新する"),
 ].map((command) => command.toJSON());
 
 // コマンドをDiscordに登録する
@@ -92,6 +102,8 @@ const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
     console.log("  /claude-workspace  — ワークスペースを登録");
     console.log("  /claude-workspaces — ワークスペース一覧");
     console.log("  /claude-help       — ヘルプを表示");
+    console.log("  /cron-list         — スケジュールジョブ一覧");
+    console.log("  /cron-reload       — crontab.json を再読み込み");
   } catch (error) {
     console.error("コマンド登録エラー:", error);
   }
