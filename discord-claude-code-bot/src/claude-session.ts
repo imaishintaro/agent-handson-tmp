@@ -596,12 +596,14 @@ export class ClaudeSessionManager {
   private buildModel(channelId: string) {
     const rawModel = this.channelModels.get(channelId) || this.defaultModel;
     if (process.env.OPENROUTER_API_KEY) {
-      // OpenRouter経由: モデルIDをそのまま渡す（例: anthropic/claude-sonnet-4-20250514）
+      // OpenRouter経由: Chat Completions API を使用（Responses APIは未サポート）
+      // openrouter(model) はデフォルトで Responses API (/v1/responses) を叩くため、
+      // openrouter.chat(model) で明示的に /v1/chat/completions を使う
       const openrouter = createOpenAI({
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.OPENROUTER_API_KEY,
       });
-      return openrouter(rawModel);
+      return openrouter.chat(rawModel);
     } else {
       // Anthropic直接: プレフィックス（anthropic/ 等）を除去してモデルIDを渡す
       const modelId = rawModel.replace(/^[^/]+\//, "");
