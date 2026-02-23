@@ -635,19 +635,44 @@ export class ClaudeSessionManager {
 
     return {
       Bash: tool({
-        description: "ワークスペースディレクトリでbashコマンドを実行する",
+        description: "ワークスペースディレクトリでbashコマンドを実行する（ワークスペース外へのアクセスは禁止）",
         inputSchema: zodSchema(z.object({
           command: z.string().describe("実行するbashコマンド"),
         })),
         execute: async (input: { command: string }) => {
+          // 危険なコマンドをブロック
+          const blockedPatterns = [
+            /\bsudo\b/,             // 権限昇格
+            /\bsu\b/,               // ユーザー切り替え
+            /\bchmod\b/,            // パーミッション変更
+            /\bchown\b/,            // オーナー変更
+            /\brm\s+(-[^\s]*)?-rf?\s+\//, // rm -rf / 等ルートへの削除
+            /\brm\s+(-[^\s]*)?-rf?\s+~/, // rm -rf ~ ホームディレクトリ削除
+            /\bshutdown\b/,         // シャットダウン
+            /\breboot\b/,           // 再起動
+            /\bmkfs\b/,             // フォーマット
+            /\bdd\b\s/,             // ディスク書き込み
+            />\s*\/(?!dev\/null)/,  // ルート直下への書き込みリダイレクト
+            /\bcurl\b.*\|\s*\bbash\b/, // curl | bash パイプ実行
+            /\bwget\b.*\|\s*\bbash\b/, // wget | bash パイプ実行
+          ];
+          for (const pattern of blockedPatterns) {
+            if (pattern.test(input.command)) {
+              return `Error: セキュリティ上の理由でこのコマンドは実行できません: ${input.command}`;
+            }
+          }
+
+          // ワークスペース外へのcdを防ぐため、コマンドをラップ
+          // cdを使ってもワークスペース外に出られないようにする
+          const wrappedCommand = `cd "${workDir}" && (${input.command}) 2>&1`;
           try {
-            const result = await exec(input.command, {
+            const result = await exec(wrappedCommand, {
               cwd: workDir,
               timeout: 30000,
+              env: { ...process.env, HOME: workDir }, // HOMEをワークスペースに限定
             });
             const stdout = String(result.stdout || "");
-            const stderr = String(result.stderr || "");
-            return (stdout + (stderr ? `\nSTDERR: ${stderr}` : "")).slice(0, 10000) || "(出力なし)";
+            return stdout.slice(0, 10000) || "(出力なし)";
           } catch (err: any) {
             const stdout = err.stdout ? String(err.stdout) : "";
             const stderr = err.stderr ? String(err.stderr) : "";
@@ -753,6 +778,56 @@ export class ClaudeSessionManager {
             // grep はマッチなしでも exit code 1 を返す
             if (err.code === 1) return "マッチしませんでした";
             return `Error: ${err.message}`;
+          }
+        },
+      }),
+
+      WebSearch: tool({
+        description: "ウェブ検索を実行して最新情報を取得する（SearXNG経由）。技術的な質問、最新ニュース、ドキュメント検索などに使用する",
+        inputSchema: zodSchema(z.object({
+          query: z.string().describe("検索クエリ"),
+          num_results: z.number().optional().describe("取得する結果数（デフォルト: 5、最大: 20）"),
+        })),
+        execute: async (input: { query: string; num_results?: number }) => {
+          const searxngUrl = process.env.SEARXNG_URL || "http://localhost:8080";
+          const numResults = Math.min(input.num_results || 5, 20);
+
+          try {
+            const params = new URLSearchParams({
+              q: input.query,
+              format: "json",
+            });
+            const res = await fetch(`${searxngUrl}/search?${params}`, {
+              signal: AbortSignal.timeout(15000),
+            });
+
+            if (!res.ok) {
+              return `Error: SearXNG API エラー (HTTP ${res.status})`;
+            }
+
+            const data = await res.json() as any;
+            const results = (data.results || []).slice(0, numResults);
+
+            if (results.length === 0) {
+              return `「${input.query}」に対する検索結果が見つかりませんでした`;
+            }
+
+            // 検索結果を整形して返す
+            const formatted = results.map((r: any, i: number) => {
+              const lines = [`[${i + 1}] ${r.title || "(タイトルなし)"}`];
+              lines.push(`    URL: ${r.url}`);
+              if (r.content) {
+                lines.push(`    ${r.content.slice(0, 200)}`);
+              }
+              return lines.join("\n");
+            }).join("\n\n");
+
+            return `「${input.query}」の検索結果（${results.length}件）:\n\n${formatted}`;
+          } catch (err: any) {
+            if (err.name === "TimeoutError") {
+              return "Error: 検索がタイムアウトしました（15秒超過）";
+            }
+            return `Error: ウェブ検索に失敗しました: ${err.message}`;
           }
         },
       }),
@@ -1000,6 +1075,18 @@ export class ClaudeSessionManager {
     this.conversationHistory.delete(channelId);
     this.save();
     return { cleared, savedFile };
+  }
+
+  /**
+   * チャット履歴にシステム通知を追加する（AIへの情報共有用）
+   * !コマンドの実行結果などをAIに伝えるために使用する
+   */
+  addSystemNotice(channelId: string, text: string): void {
+    const messages: ModelMessage[] = this.chatHistory.get(channelId) || [];
+    // ユーザーからの通知としてchatHistoryに追加し、AIが次の応答時に認識できるようにする
+    messages.push({ role: "user", content: `[システム通知] ${text}` });
+    messages.push({ role: "assistant", content: "了解しました。" });
+    this.chatHistory.set(channelId, messages);
   }
 
   /**

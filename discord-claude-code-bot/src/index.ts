@@ -13,12 +13,16 @@ import {
   type TextChannel,
 } from "discord.js";
 import { config } from "dotenv";
+import { exec as execCb } from "child_process";
+import { promisify } from "util";
 import { createWriteStream, existsSync, mkdirSync, statSync } from "fs";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import { resolve, basename, join } from "path";
 import { ClaudeSessionManager, type ProgressEvent } from "./claude-session";
 import { CronRunner, describeSchedule } from "./cron-runner";
+
+const exec = promisify(execCb);
 
 // 環境変数を読み込む
 config();
@@ -47,7 +51,8 @@ if (process.env.OPENROUTER_API_KEY) {
 
 // 設定値
 const DEFAULT_MODEL = process.env.MODEL || "claude-sonnet-4-20250514";
-const WORK_DIR = process.env.WORK_DIR || process.cwd();
+// WORK_DIR: 相対パスの場合はプロジェクトルートからの絶対パスに変換
+const WORK_DIR = resolve(process.env.WORK_DIR || process.cwd());
 const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
   ? process.env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
   : [];
@@ -1025,6 +1030,93 @@ client.on("messageCreate", async (message: Message) => {
   if (message.author.bot) return;
 
   const content = message.content.trim();
+
+  // ========================================
+  // !コマンド ダイレクト実行（AIを介さずシェルで直接実行）
+  // ========================================
+  if (content.startsWith("!") && !content.startsWith(PREFIX)) {
+    const shellCommand = content.slice(1).trim();
+    if (!shellCommand) return;
+
+    // 権限チェック
+    if (!isUserAllowed(message.author.id)) {
+      await message.reply({
+        embeds: [buildErrorEmbed("このボットを使用する権限がありません。")],
+      });
+      return;
+    }
+
+    // 危険なコマンドをブロック（Bashツールと同じパターン）
+    const blockedPatterns = [
+      /\bsudo\b/,
+      /\bsu\b/,
+      /\bchmod\b/,
+      /\bchown\b/,
+      /\brm\s+(-[^\s]*)?-rf?\s+\//,
+      /\brm\s+(-[^\s]*)?-rf?\s+~/,
+      /\bshutdown\b/,
+      /\breboot\b/,
+      /\bmkfs\b/,
+      /\bdd\b\s/,
+      />\s*\/(?!dev\/null)/,
+      /\bcurl\b.*\|\s*\bbash\b/,
+      /\bwget\b.*\|\s*\bbash\b/,
+    ];
+    for (const pattern of blockedPatterns) {
+      if (pattern.test(shellCommand)) {
+        await message.reply({
+          embeds: [buildErrorEmbed(`セキュリティ上の理由でこのコマンドは実行できません: \`${shellCommand}\``)],
+        });
+        return;
+      }
+    }
+
+    // workspace内で実行（タイムアウト30秒）
+    const workDir = sessionManager.resolveWorkDir(message.channelId);
+    log(`⚡ !コマンド実行`, C.cyan, `[${message.author.username}] ${shellCommand}`);
+
+    try {
+      const result = await exec(`cd "${workDir}" && (${shellCommand}) 2>&1`, {
+        cwd: workDir,
+        timeout: 30000,
+        env: { ...process.env, HOME: workDir },
+      });
+      const output = String(result.stdout || "").slice(0, 4000) || "(出力なし)";
+
+      // 結果をEmbedで返信
+      const embed = new EmbedBuilder()
+        .setColor(EMBED_COLOR.success)
+        .setTitle(`\`${shellCommand}\``)
+        .setDescription(`\`\`\`\n${output}\n\`\`\``)
+        .setFooter({ text: "!コマンド ダイレクト実行" });
+      await message.reply({ embeds: [embed] });
+
+      // AIのchatHistoryに通知を追加
+      sessionManager.addSystemNotice(
+        message.channelId,
+        `ユーザーが \`!${shellCommand}\` コマンドを実行しました。結果:\n${output.slice(0, 1000)}`
+      );
+    } catch (err: any) {
+      const stdout = err.stdout ? String(err.stdout) : "";
+      const stderr = err.stderr ? String(err.stderr) : "";
+      const output = (stdout + "\n" + stderr).trim().slice(0, 4000) || err.message;
+
+      // エラー時もEmbedで返信
+      const embed = new EmbedBuilder()
+        .setColor(EMBED_COLOR.error)
+        .setTitle(`\`${shellCommand}\``)
+        .setDescription(`\`\`\`\n${output}\n\`\`\``)
+        .setFooter({ text: "!コマンド ダイレクト実行（エラー）" });
+      await message.reply({ embeds: [embed] });
+
+      // AIにもエラーを通知
+      sessionManager.addSystemNotice(
+        message.channelId,
+        `ユーザーが \`!${shellCommand}\` コマンドを実行しましたが、エラーが発生しました:\n${output.slice(0, 500)}`
+      );
+    }
+    return;
+  }
 
   // メンション or プレフィックスで始まるメッセージのみ処理
   // DM または AUTO_CHANNELS に指定されたチャンネルはプレフィックス不要
