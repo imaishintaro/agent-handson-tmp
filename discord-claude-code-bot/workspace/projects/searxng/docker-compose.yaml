@@ -1,0 +1,15 @@
+# SearXNG - discoAI ウェブ検索バックエンド
+# 起動: docker compose up -d
+# 確認: curl "http://localhost:8080/search?q=test&format=json"
+version: "3.8"
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./settings:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    restart: unless-stopped

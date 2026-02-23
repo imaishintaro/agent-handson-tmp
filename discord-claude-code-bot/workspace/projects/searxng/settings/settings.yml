@@ -1,0 +1,21 @@
+# SearXNG 設定 - discoAI ウェブ検索ツール用
+# JSON APIを有効にしてボットから利用可能にする
+
+use_default_settings: true
+
+general:
+  instance_name: "discoAI Search"
+
+search:
+  # JSON形式のレスポンスを許可
+  formats:
+    - html
+    - json
+
+server:
+  # ローカルからのアクセスのみ許可
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "discoai-searxng-local-only"
+  # レート制限を無効化（ローカル利用のため）
+  limiter: false
